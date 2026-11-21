@@ -1,0 +1,7 @@
+# dane syntetyczne i wyniki są generowane (python data_gen/gen_data.py, evaluation/evaluate.py)
+data/
+results/
+simulator/sim
+__pycache__/
+*.pyc
+.idea/

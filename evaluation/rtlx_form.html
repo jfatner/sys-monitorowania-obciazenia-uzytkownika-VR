@@ -1,0 +1,20 @@
+<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Raw NASA-TLX</title>
+<style>body{font:16px system-ui;max-width:640px;margin:2rem auto;padding:0 16px}label{display:block;margin-top:1.2rem;font-weight:600}
+small{display:block;font-weight:400;color:#555}input[type=range]{width:100%}.v{float:right}button{margin-top:1.5rem;padding:.6rem 1.2rem;font-size:1rem}
+pre{background:#f4f4f4;padding:1rem;overflow:auto}</style>
+<h1>Raw NASA-TLX</h1><p>Oceń ostatnią sesję VR na skali 0-100.</p>
+<label>Kod uczestnika <input id="pid" placeholder="P01"></label>
+<div id="s"></div><button onclick="save()">Zapisz odpowiedź</button><pre id="out"></pre>
+<script>
+const Q=[["mental","Wymagania umysłowe","Jak dużo myślenia, decydowania, zapamiętywania wymagało zadanie?","Niskie","Wysokie"],
+["physical","Wymagania fizyczne","Jak duży był wysiłek fizyczny (ruch głowy, rąk, ciała)?","Niskie","Wysokie"],
+["temporal","Presja czasu","Jak bardzo czuł(a)ś pośpiech lub tempo zadania?","Niska","Wysoka"],
+["performance","Wykonanie zadania","Jak skuteczny(a) byłe(a)ś? (0 = perfekcyjnie, 100 = porażka)","Dobre","Złe"],
+["effort","Wysiłek","Jak ciężko musiał(a)ś pracować, aby osiągnąć swój wynik?","Niski","Wysoki"],
+["frustration","Frustracja i stres","Jak bardzo byłe(a)ś niepewny(a), zniechęcony(a), zirytowany(a), zestresowany(a)?","Niska","Wysoka"]];
+document.getElementById('s').innerHTML=Q.map(q=>`<label>${q[1]}<span class=v id=v_${q[0]}>50</span><small>${q[2]}</small>
+<input type=range min=0 max=100 step=5 value=50 id=${q[0]} oninput="v_${q[0]}.textContent=this.value"><small>${q[3]} ← → ${q[4]}</small></label>`).join('');
+function save(){const row=[pid.value||"?",...Q.map(q=>document.getElementById(q[0]).value)].join(",");
+const hdr="participant,"+Q.map(q=>q[0]).join(",");out.textContent=hdr+"\n"+row+"\n\nSkopiuj wiersz do evaluation/responses.csv";}
+</script></html>

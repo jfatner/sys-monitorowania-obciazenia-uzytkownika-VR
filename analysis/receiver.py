@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""Odbiornik strumieniowy (Moduł 2): TCP <- symulator C.
+"""Odbiornik strumieniowy (Moduł 2): TCP <- symulator w C (Moduł 1).
 
-Zbiera próbki NAZWA,t,wartość; gdy czas strumienia przekroczy koniec kolejnego okna
-(co 10 s), liczy cechy fizjologiczne z ostatnich 30 s i wypisuje je na bieżąco.
-Po otrzymaniu END dołącza cechy z wideo (plik z gogli VR) i zapisuje CSV.
+Symulator odtwarza pliki z sesje/<ID>/wyniki/strumienie/ (tworzy je process_session.py).
+Odbiornik co 10 s liczy cechy z ostatnich 30 s i wypisuje je na bieżąco, a po END dołącza
+analizę obrazu z tej samej sesji i zapisuje wyniki/cechy_stream.csv.
 
-Strumienie: POLAR_RR, EMP_EDA, EMP_BVP.
-Użycie: receiver.py --port 5555 --video data/P01/video.avi --out wyniki.csv
+Użycie: python analysis/receiver.py --session sesje/P01 [--port 5555]
 """
-import argparse, os, socket, sys, numpy as np, pandas as pd
-sys.path.insert(0, os.path.dirname(__file__))
-from session import *
-from video import video_frame_features, video_window_features
+import argparse, os, socket, sys
+import numpy as np, pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config as C
+from session import load_session, analyze, physio_window
+from video import analyze_app, analyze_webcam
+
+NAMES = {"POLAR_RR": "rr", "EMP_EDA": "eda", "EMP_BVP": "bvp", "EMP_ACC": "acc", "POLAR_HR": "hr", "EMP_IBI": "ibi"}
+
 
 def serve(port):
     srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", port)); srv.listen(1)
-    print(f"[receiver] nasłuch na :{port}", flush=True)
-    conn, _ = srv.accept(); srv.close()
+    srv.bind(("0.0.0.0", port)); srv.listen(1)
+    print(f"[receiver] nasłuch na porcie {port} - uruchom teraz symulator", flush=True)
+    conn, addr = srv.accept(); srv.close()
+    print(f"[receiver] połączono z {addr[0]}", flush=True)
     buf = b""
     with conn:
         while True:
@@ -25,40 +30,38 @@ def serve(port):
             if not chunk: return
             buf += chunk
             *lines, buf = buf.split(b"\n")
-            for ln in lines:
-                yield ln.decode()
+            for ln in lines: yield ln.decode()
+
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=5555); ap.add_argument("--video", required=True)
-    ap.add_argument("--out", default="stream_result.csv")
+    ap = argparse.ArgumentParser(); ap.add_argument("--session", required=True); ap.add_argument("--port", type=int, default=5555)
     a = ap.parse_args()
-    B = {k: ([], []) for k in ("POLAR_RR", "EMP_EDA", "EMP_BVP")}
-    latest = {k: 0.0 for k in B}; next_end = WIN; rows = []; n = 0
-
-    def emit(t1):
-        arr = {k: (np.array(v[0]), np.array(v[1])) for k, v in B.items()}
-        r = physio_window(*arr["POLAR_RR"], *arr["EMP_EDA"], *arr["EMP_BVP"], t1 - WIN, t1)
-        rows.append(r)
-        print(f"[receiver] okno do {t1:5.0f}s  HR={r['hr_polar']:.1f}  RMSSD={r['rmssd']:.1f}  "
-              f"EDA={r['eda_tonic']:.2f}  SCR/min={r['scr_rate']:.1f}  BVP-HR={r['bvp_hr']:.1f}", flush=True)
-
+    S = load_session(a.session, log=lambda *x: None)
+    B = {}; latest = {}; next_end = C.WIN; n = 0
     for ln in serve(a.port):
         if ln == "END": break
-        try: name, t, v = ln.split(","); t, v = float(t), float(v)
-        except ValueError: continue
-        if name not in B: continue
-        B[name][0].append(t); B[name][1].append(v); latest[name] = t; n += 1
-        while min(latest.values()) >= next_end:           # wszystkie strumienie doszły do końca okna
-            emit(next_end); next_end += STEP
-    print(f"[receiver] odebrano {n} próbek; analiza wideo...", flush=True)
-    vr, fps = video_frame_features(a.video)
-    for r in rows:
-        r.update(video_window_features(vr, fps, r["t_end"] - WIN, r["t_end"]))
-        r["load_index"], gs = load_index(r)
-        r.update({f"idx_{k}": v for k, v in gs.items()})
-    pd.DataFrame(rows).to_csv(a.out, index=False)
-    print(f"[receiver] zapisano {a.out}", flush=True)
+        try:
+            name, t, v = ln.split(","); t, v = float(t), float(v)
+        except ValueError:
+            continue
+        k = NAMES.get(name)
+        if not k: continue
+        B.setdefault(k, ([], [])); B[k][0].append(t); B[k][1].append(v); latest[k] = t; n += 1
+        while latest and min(latest.values()) >= next_end:
+            st = {kk: (np.array(x[0]), np.array(x[1])) for kk, x in B.items()}
+            st.update({kk: S["streams"][kk] for kk in ("eda_fs", "bvp_fs", "acc_fs") if kk in S["streams"]})
+            r = physio_window(st, next_end - C.WIN, next_end)
+            print(f"[receiver] okno do {next_end:5.0f}s  HR={r.get('hr', np.nan):5.1f}  RMSSD={r.get('rmssd', np.nan):5.1f}  "
+                  f"EDA={r.get('eda_tonic', np.nan):5.2f}  SCR/min={r.get('scr_rate', np.nan):4.1f}", flush=True)
+            next_end += C.STEP
+    print(f"[receiver] odebrano {n} próbek; analiza obrazu i zapis...", flush=True)
+    S["streams"].update({k: (np.array(x[0]), np.array(x[1])) for k, x in B.items()})   # dane z sieci zamiast z plików
+    app = analyze_app(S["app"], S["frame_times"]) if S.get("app") else None
+    cam = analyze_webcam(S["webcam"], S["frame_times"]) if S.get("webcam") else None
+    df, _ = analyze(S, app, cam)
+    out = os.path.join(S["folder"], "wyniki", "cechy_stream.csv"); df.to_csv(out, index=False)
+    print(f"[receiver] zapisano {out}", flush=True)
+
 
 if __name__ == "__main__":
     main()

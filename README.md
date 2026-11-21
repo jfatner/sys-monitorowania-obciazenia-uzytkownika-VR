@@ -1,32 +1,107 @@
 # System monitorowania obciążenia użytkownika VR
 
-Implementacja trzech modułów z opisu projektu. **Uwaga: całość działa na danych syntetycznych**
-(brak prawdziwych plików Polar/Empatica, nagrania z gogli i ankiet) - patrz „Co zastąpić".
+Ocena obciążenia (stresu, zmęczenia) użytkownika aplikacji VR na podstawie:
+- **Polar**: tętno i zmienność rytmu serca (HRV),
+- **Empatica**: przewodnictwo skóry (EDA), tętno optyczne (BVP), ruch ręki (ACC),
+- **obrazu z gogli** (Meta Quest przez OBS): zagęszczenie obiektów, ruch sceny i głowy,
+- **kamery laptopa**: ruch użytkownika,
 
-## Struktura
-| Katalog | Zawartość |
-|---|---|
-| `data_gen/gen_data.py` | generator 12 sesji (RR Polar, EDA+BVP Empatica, wideo 320x240@10 fps, prawda terenowa) |
-| `simulator/sim.c` | **Moduł 1** (C): wczytanie CSV, wątek na strumień, SCHED_FIFO wg częstotliwości, timery absolutne `clock_nanosleep(TIMER_ABSTIME)`, wysyłka TCP, statystyki opóźnień |
-| `analysis/physio.py` | **Moduł 2**: filtry Butterwortha, DFT/FFT (`dft_naive` do weryfikacji), HRV (RMSSD, SDNN, LF/HF), EDA (tonic, SCR), HR z BVP |
-| `analysis/video.py` | **Moduł 2**: rozmycie Gaussa, Otsu, morfologia, transformata odległości, Canny; liczba obiektów; kompensacja ruchu głowy, ruchome obiekty, energia i częstotliwość ruchu |
-| `analysis/receiver.py` | odbiornik TCP, okna 30 s co 10 s, wynik na żywo |
-| `analysis/session.py` | okna i obiektywny wskaźnik obciążenia 0-100 |
-| `evaluation/` | **Moduł 3**: formularz RTLX (`rtlx_form.html`), scenariusz wywiadu, `evaluate.py` (korelacje Pearsona/Spearmana) |
+walidowana ankietą Raw NASA-TLX i krótkim wywiadem.
 
-Podział osób z dokumentu jest zachowany w komentarzach nagłówkowych plików.
+## Wersje
+| Wersja | Tag | Obsługa |
+|---|---|---|
+| 1 | `v1.0` | skrypty uruchamiane po kolei w terminalu |
+| 2 | `v2.0` | aplikacja okienkowa (tkinter) uruchamiająca te same skrypty |
+| 3 | `v3.0` | aplikacja w przeglądarce (lokalny serwer, działa bez internetu) |
 
-## Uruchomienie
-```bash
-python3 data_gen/gen_data.py --out data --n 12 --dur 120   # ~1 min
-./run_demo.sh P01 10            # symulator C -> TCP -> odbiornik (10x szybciej niż czas rzeczywisty)
-python3 evaluation/gen_synthetic_responses.py              # tylko do testu; pomiń przy prawdziwych danych
-python3 evaluation/evaluate.py                             # korelacje, wykresy w results/
+Analiza (moduły 1-3) jest we wszystkich wersjach taka sama - różni się tylko sposób obsługi.
+Starsze wersje: zakładka **Tags** na GitHubie albo `git checkout v1.0`.
+
+## Przebieg pracy - skrypty
+Wszystkie polecenia z głównego folderu projektu, w środowisku vr (`conda activate D:\srodowiska\vr`).
+
+1. **Nagranie sesji** - okno podglądu (gogle + kamera + maska różnic):
+   ```
+   python nagrywanie/record_session.py --id P01
+   ```
+   W oknie: **R** start/stop, **T** start zadania (koniec spoczynku), **M** synchronizacja, **E** znacznik, **Q** koniec.
+   Numery kamer: `--list-cameras`, potem `--laptop-cam 0 --quest-cam 1`.
+2. **Pliki z opasek** - skopiuj do `sesje/P01/polar/` (pliki `_HR.txt`, `_PPI.txt`) i `sesje/P01/empatica/`.
+3. **Ankieta** - otwórz `evaluation/ankieta.html` w przeglądarce, zapisz, a pobrany `ankieta_P01.json`
+   przenieś do `sesje/P01/`.
+4. **Fragment do analizy** (opcjonalnie) - w `sesje/P01/info.json` dopisz np. `"fragment_s": [90, 170]` (sekundy).
+5. **Analiza** jednej sesji albo wszystkich:
+   ```
+   python analysis/process_session.py sesje/P01
+   python analysis/process_session.py sesje
+   ```
+6. **Zestawienie** (korelacje z ankietami):
+   ```
+   python evaluation/evaluate.py sesje
+   ```
+Część czasu rzeczywistego (symulator C na QNX/Linux/WSL odtwarzający nagrane dane jak na żywo):
+`./run_stream.sh sesje/P01 1`.
+
+Szczegóły przeprowadzenia sesji: **[PROTOKOL_SESJI.md](PROTOKOL_SESJI.md)**.
+
+## Folder jednej sesji
 ```
-Na QNX: `make CC=qcc CFLAGS="-Vgcc_ntox86_64 -O2 -Wall" LDLIBS=""` (pthread jest w libc). Bez uprawnień
-do SCHED_FIFO symulator ostrzega i działa na zwykłych wątkach.
+sesje/P01/
+  app.mp4, webcam.mp4, frames.csv, events.csv, info.json   <- z nagrywarki (krok 1)
+  polar/      <- plik(i) z Polara, bez zmian nazw
+  empatica/   <- folder dnia z raw_data (.avro, EmbracePlus) albo eksport E4
+  ankieta_P01.json                                          <- z formularza ankiety
+  wyniki/                                                   <- tworzy analiza
+    cechy.csv          cechy w oknach 30 s co 10 s + wskaźnik obciążenia 0-100
+    podsumowanie.json  spoczynek, średnie z zadania, szczyt, ostrzeżenia
+    przebieg.png       wykres całej sesji
+    obraz_app.csv, obraz_webcam.csv, strumienie/*.csv
+```
+**Nazwy folderów:** używajcie kodów (P01, P02, …), a listę „kod → imię i nazwisko” trzymajcie osobno,
+poza projektem (np. tylko u prowadzącego). Nagrania z kamerki i dane fizjologiczne to dane osobowe,
+a kod w nazwie folderu ułatwia też dzielenie się wynikami bez ujawniania, kto jest kim.
 
-## Co zastąpić prawdziwymi danymi
-1. Pliki `polar_rr.csv` (t,rr_ms), `empatica_eda.csv` (t,eda_uS), `empatica_bvp.csv` (t,bvp), `video.avi` w `data/Pxx/`.
-2. `evaluation/responses.csv` z formularza RTLX (gdy istnieje, ma pierwszeństwo przed `_SYNTHETIC`).
-3. Zakresy `REF` w `analysis/session.py` i progi w `video.py` - strojone ręcznie pod dane syntetyczne.
+## Struktura kodu
+| Plik | Moduł | Zawartość |
+|---|---|---|
+| `simulator/sim.c` | 1 | C, POSIX/QNX: wątek na strumień, SCHED_FIFO wg częstotliwości, timery `clock_nanosleep(TIMER_ABSTIME)`, wysyłka TCP |
+| `nagrywanie/record_session.py` | – | nagrywarka (na bazie podglądu kolegi): czyste wideo + czas każdej klatki + znaczniki |
+| `analysis/importers.py` | 2 | wczytanie eksportów E4 i Polara, czasy bezwzględne |
+| `analysis/physio.py` | 2 | filtry, DFT, HRV (RMSSD, SDNN, LF/HF), EDA (tonic, SCR), BVP, ACC |
+| `analysis/video.py` | 2 | segmentacja i liczba obiektów, przepływ optyczny (ruch głowy vs ruch elementów), ruch użytkownika z kamerki |
+| `analysis/session.py` | 2 | synchronizacja, okna, wskaźnik obciążenia względem spoczynku |
+| `analysis/config.py` | 2 | **wszystkie progi i wagi w jednym miejscu** |
+| `analysis/process_session.py` | 2 | analiza sesji, wykres, podsumowanie |
+| `analysis/receiver.py` | 2 | odbiór danych z symulatora C na żywo |
+| `evaluation/ankieta.html` | 3 | formularz RTLX + wywiad, zapis do pliku JSON |
+| `evaluation/evaluate.py` | 3 | korelacje Pearsona/Spearmana, zgodność momentu szczytu |
+
+## Jak liczony jest wskaźnik obciążenia
+Każda osoba jest porównywana **sama ze sobą**: z okresem spoczynku na początku sesji (od startu
+nagrania do znacznika T, z pominięciem pierwszych 30 s - reakcji na założenie gogli). Dla każdej cechy liczona jest zmiana względem spoczynku i przeliczana na 0–1,
+np. +25 bpm tętna = 1, spadek RMSSD o 60% = 1, dwukrotny wzrost EDA = 1. Cechy są uśredniane w grupach:
+**fizjologia** (waga 0,6), **ruch** (0,2), **scena** (0,2) i dają wskaźnik 0–100.
+Skale i wagi to założenia (HEURYSTYKA w `config.py`) - do sprawdzenia po pierwszych sesjach.
+
+## Stan obsługi urządzeń (po testach na prawdziwych plikach)
+- **Polar Verity Sense** przez aplikację Polar Sensor Logger: zaznaczać **HR + PPI**. Działa. Uderzenia oznaczone
+  przez opaskę jako zakłócone (`blocker`) są odrzucane, a „zamrożone” HR (stała wartość > 30 s, gdy czujnik zgubi
+  puls) pomijane. Przy dużym ruchu ręki HRV nie da się policzyć - program to zgłasza w ostrzeżeniach.
+- **Empatica EmbracePlus**: czytane są surowe pliki `.avro` (folder `raw_data` z chmury Empatiki, pobierany kluczami
+  Data Access Keys) - bez dodatkowych bibliotek. Do `sesje/Pxx/empatica/` wrzucacie folder z dnia sesji
+  (np. `participant_data/2026-11-17`) albo same pliki `.avro`; folder `digital_biomarkers` jest pomijany.
+  **Uwaga:** w pierwszych pobranych plikach EDA i BVP były puste - te czujniki trzeba włączyć w konfiguracji badania
+  w Care Lab Portal. Do tego czasu z Empatiki używany jest akcelerometr, temperatura i znaczniki przycisku (synchronizacja).
+  Format E4 (CSV) też jest obsługiwany.
+- **Liczba obiektów** to przybliżenie (obszary ograniczone krawędziami). Sprawdźcie na `wyniki/klatki/`, czy obrysy
+  mają sens na waszej scenie; próg w `analysis/config.py` (`MIN_OBJ_AREA`).
+
+## Ograniczenia interpretacji
+Przy kilkunastu osobach korelacje mają szerokie przedziały ufności, a `evaluate.py` liczy wiele par
+naraz, więc część „istotnych” wyników może być przypadkowa. W sprawozdaniu warto wskazać z góry
+2–3 główne hipotezy (np. `load_index` vs RTLX, `hr_delta` vs RTLX) i to je traktować jako test.
+
+## Środowisko
+Python 3.12: `numpy>=2 scipy pandas matplotlib` (conda-forge) + `pip install opencv-python`.
+Symulator w C: Linux/WSL (`make -C simulator`) albo QNX (`make CC=qcc CFLAGS="-Vgcc_ntox86_64 -O2 -Wall" LDLIBS=""`).

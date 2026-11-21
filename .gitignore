@@ -1,7 +1,13 @@
-# dane syntetyczne i wyniki są generowane (python data_gen/gen_data.py, evaluation/evaluate.py)
-data/
-results/
-simulator/sim
+# dane uczestników - NIGDY do repozytorium (nagrania twarzy, dane fizjologiczne)
+sesje/*
+!sesje/README.md
+
+# lokalne ustawienia i pliki tymczasowe
+app_settings.json
 __pycache__/
 *.pyc
+simulator/sim
 .idea/
+.vscode/
+*.mp4
+*.avro

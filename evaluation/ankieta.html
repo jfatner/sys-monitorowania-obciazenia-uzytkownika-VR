@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ankieta po sesji VR</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1d1d1b; --mut:#6b6b66; --acc:#2f5d8a; --line:#ddd; }
+  body { font:16px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); margin:0; }
+  main { max-width:720px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.5rem; margin:0 0 4px; } h2 { font-size:1.1rem; margin:28px 0 8px; color:var(--acc); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin:12px 0; }
+  label { display:block; font-weight:600; margin-top:14px; }
+  small { display:block; font-weight:400; color:var(--mut); }
+  input[type=text], textarea, select { width:100%; box-sizing:border-box; font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; margin-top:4px; }
+  input[type=range] { width:100%; margin-top:6px; }
+  .val { float:right; font-variant-numeric:tabular-nums; color:var(--acc); }
+  .ends { display:flex; justify-content:space-between; color:var(--mut); font-size:.85rem; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; } .row > * { flex:1; min-width:140px; }
+  .chk label { display:inline-block; font-weight:400; margin:6px 14px 0 0; }
+  button { font:inherit; background:var(--acc); color:#fff; border:0; border-radius:8px; padding:10px 18px; margin-top:20px; cursor:pointer; }
+  #msg { margin-top:12px; color:var(--acc); font-weight:600; } #msg.ok { color:#1b7f3b; } #msg.err { color:#c0392b; }
+  .who { font-size:.8rem; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ankieta po sesji VR</h1>
+  <p class="who">Raw NASA-TLX + krótki wywiad ustrukturyzowany</p>
+
+  <div class="card">
+    <div class="row">
+      <div><label>Kod uczestnika<input id="id" type="text" placeholder="P01"></label></div>
+      <div><label>Prowadzący<input id="prowadzacy" type="text"></label></div>
+    </div>
+  </div>
+
+  <h2>Część A: wypełnia uczestnik (Raw NASA-TLX)</h2>
+  <div class="card" id="tlx"></div>
+
+  <h2>Część B: wywiad (wypełnia prowadzący)</h2>
+  <div class="card">
+    <label>1. W którym momencie poczuł(a) Pan(i) największe napięcie lub zmęczenie?
+      <small>Czas od startu nagrania (mm:ss), np. 03:20. Zostaw puste, jeśli nie umie wskazać.</small>
+      <input id="najwieksze_napiecie_czas" type="text" placeholder="mm:ss"></label>
+    <label>Co się wtedy działo?<textarea id="najwieksze_napiecie_opis" rows="2"></textarea></label>
+    <label>2. Kiedy czuł(a) się Pan(i) najspokojniej?<textarea id="najspokojniej" rows="2"></textarea></label>
+    <label>3. Czy liczba lub tempo obiektów na scenie wpływały na samopoczucie?
+      <select id="wplyw_obiektow"><option value="">wybierz</option><option>nie</option><option>trochę</option><option>wyraźnie</option></select></label>
+    <textarea id="wplyw_obiektow_opis" rows="2" placeholder="w jaki sposób"></textarea>
+    <label>4. Odczuwane objawy fizyczne</label>
+    <div class="chk" id="objawy">
+      <label><input type="checkbox" value="zawroty"> zawroty głowy</label>
+      <label><input type="checkbox" value="nudnosci"> nudności</label>
+      <label><input type="checkbox" value="cieplo"> uczucie ciepła</label>
+      <label><input type="checkbox" value="kolatanie"> szybsze bicie serca</label>
+      <label><input type="checkbox" value="pocenie"> pocenie dłoni</label>
+      <label><input type="checkbox" value="zmeczenie_oczu"> zmęczenie oczu</label>
+    </div>
+    <label>5. Jak ogólnie stresująca była sesja? <span class="val" id="v_stres">3</span>
+      <input id="stres_1_5" type="range" min="1" max="5" step="1" value="3"
+             oninput="document.getElementById('v_stres').textContent=this.value">
+      <div class="ends"><span>1 – wcale</span><span>5 – bardzo</span></div></label>
+    <label>6. Co zmienić w aplikacji, żeby zmniejszyć obciążenie?<textarea id="sugestie" rows="2"></textarea></label>
+    <label>Uwagi prowadzącego<small>np. problemy techniczne, przerwy, zdjęte gogle</small><textarea id="uwagi" rows="2"></textarea></label>
+  </div>
+
+  <button onclick="save()">Zapisz ankietę</button>
+  <div id="msg"></div>
+</main>
+<script>
+const TLX = [
+  ["mental", "Wymagania umysłowe", "Ile myślenia, decydowania, zapamiętywania wymagało zadanie?", "Bardzo niskie", "Bardzo wysokie"],
+  ["physical", "Wymagania fizyczne", "Jak duży był wysiłek fizyczny (ruchy głowy, rąk, ciała)?", "Bardzo niskie", "Bardzo wysokie"],
+  ["temporal", "Presja czasu", "Jak bardzo czuł(a) Pan(i) pośpiech lub narzucone tempo?", "Bardzo niska", "Bardzo wysoka"],
+  ["performance", "Wykonanie zadania", "Jak dobrze poszło zadanie?", "Perfekcyjnie", "Porażka"],
+  ["effort", "Wysiłek", "Jak ciężko musiał(a) Pan(i) pracować, żeby osiągnąć ten wynik?", "Bardzo niski", "Bardzo wysoki"],
+  ["frustration", "Frustracja", "Jak bardzo był(a) Pan(i) zirytowany(a), zniechęcony(a), zestresowany(a)?", "Bardzo niska", "Bardzo wysoka"],
+];
+document.getElementById("tlx").innerHTML = TLX.map(([k, t, q, lo, hi]) => `
+  <label>${t} <span class="val" id="v_${k}">50</span><small>${q}</small>
+    <input type="range" id="${k}" min="0" max="100" step="5" value="50"
+           oninput="document.getElementById('v_${k}').textContent=this.value">
+    <div class="ends"><span>${lo}</span><span>${hi}</span></div></label>`).join("");
+
+function save() {
+  const v = id => document.getElementById(id).value.trim();
+  const id = v("id");
+  if (!id) { alert("Podaj kod uczestnika"); return; }
+  const t = v("najwieksze_napiecie_czas");
+  if (t && !/^\d{1,3}:\d{2}$/.test(t)) { alert("Czas wpisz jako mm:ss, np. 03:20"); return; }
+  const d = { id, prowadzacy: v("prowadzacy"), zapisano: new Date().toISOString() };
+  TLX.forEach(([k]) => d[k] = +v(k));
+  d.rtlx = Math.round(TLX.reduce((s, [k]) => s + d[k], 0) / TLX.length * 10) / 10;
+  ["najwieksze_napiecie_czas", "najwieksze_napiecie_opis", "najspokojniej", "wplyw_obiektow",
+   "wplyw_obiektow_opis", "sugestie", "uwagi"].forEach(k => d[k] = v(k));
+  d.objawy = [...document.querySelectorAll("#objawy input:checked")].map(x => x.value);
+  d.stres_1_5 = +v("stres_1_5");
+  if (location.protocol.startsWith("http")) {            // otwarte z aplikacji - zapis prosto do folderu sesji
+    fetch(`/api/p/${encodeURIComponent(id)}/survey`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(d) })
+      .then(r => r.json().then(j => ({ ok: r.ok, j })))
+      .then(({ ok, j }) => {
+        const m = document.getElementById("msg");
+        if (ok) { m.textContent = `Zapisano w aplikacji (RTLX = ${d.rtlx}). Możesz zamknąć tę kartę.`; m.className = "ok"; }
+        else { m.textContent = "Nie zapisano: " + (j.error || "błąd"); m.className = "err"; }
+      }).catch(e => { document.getElementById("msg").textContent = "Brak połączenia z aplikacją: " + e; });
+    return;
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(d, null, 2)], { type: "application/json" }));
+  a.download = `ankieta_${id}.json`; a.click();
+  document.getElementById("msg").textContent =
+    `Zapisano ankieta_${id}.json (RTLX = ${d.rtlx}). Przenieś plik do folderu sesje\\${id}\\`;
+}
+const qid = new URLSearchParams(location.search).get("id");
+if (qid) { const f = document.getElementById("id"); f.value = qid; f.readOnly = true; document.title = `Ankieta - ${qid}`; }
+</script>
+</body>
+</html>

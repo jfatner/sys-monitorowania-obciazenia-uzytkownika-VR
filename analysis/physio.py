@@ -1,7 +1,8 @@
 """Przetwarzanie sygnałów fizjologicznych (Moduł 2).
 
-Polar  (Piotr Michałkiewicz): RR -> HR, RMSSD, SDNN, LF/HF (DFT)
-Empatica (Janusz Fątner):     EDA -> poziom tonic, liczba SCR; BVP -> HR (DFT), SNR
+Polar  (Piotr Michałkiewicz): RR -> HR, RMSSD, SDNN, LF/HF (DFT); albo samo HR
+Empatica (Janusz Fątner):     EDA -> poziom tonic, liczba SCR; BVP -> HR (DFT), SNR;
+                              ACC -> intensywność ruchu nadgarstka; TEMP
 Wszystkie funkcje działają na oknie czasowym (tablice numpy), więc ten sam kod służy
 do analizy wsadowej i strumieniowej.
 """
@@ -37,13 +38,23 @@ def clean_rr(t, rr):
     ok &= np.abs(rr - med) < 0.2 * med
     return t[ok], rr[ok]
 
-def rr_features(t, rr, fs_i=4.0):
-    out = dict(hr_polar=np.nan, rmssd=np.nan, sdnn=np.nan, lf_hf=np.nan)
+def rr_features(t, rr, fs_i=4.0, max_gap_s=None):
+    """max_gap_s: jeśli podane (np. IBI z Empatiki z przerwami), RMSSD tylko z kolejnych uderzeń."""
+    out = dict(hr=np.nan, rmssd=np.nan, sdnn=np.nan, lf_hf=np.nan, rr_valid=np.nan)
+    n0 = len(rr)
     t, rr = clean_rr(t, rr)
     if len(rr) < 10: return out
-    out["hr_polar"] = float(60000 / rr.mean())
+    out["rr_valid"] = float(len(rr) / max(n0, 1))
+    out["hr"] = float(60000 / rr.mean())
     out["sdnn"] = float(rr.std(ddof=1))
-    out["rmssd"] = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
+    d = np.diff(rr)
+    if max_gap_s is not None:
+        consecutive = np.abs(np.diff(t) - rr[1:] / 1000) < 0.25
+        d = d[consecutive]
+    if len(d) < 5: return out
+    out["rmssd"] = float(np.sqrt(np.mean(d ** 2)))
+    if max_gap_s is not None and np.max(np.diff(t)) > max_gap_s:
+        return out                                                  # widmo z dziurami byłoby fałszywe
     ti = np.arange(t[0], t[-1], 1 / fs_i)
     if len(ti) < 32: return out
     ri = signal.detrend(np.interp(ti, t, rr))
@@ -53,7 +64,7 @@ def rr_features(t, rr, fs_i=4.0):
     return out
 
 # ---------- Empatica: EDA ----------
-def eda_features(t, eda, fs=4.0, min_prom=0.1):
+def eda_features(t, eda, fs=4.0, min_prom=0.05):
     out = dict(eda_tonic=np.nan, scr_rate=np.nan)
     eda = np.asarray(eda, float)
     if len(eda) < 20: return out
@@ -80,3 +91,16 @@ def bvp_features(t, bvp, fs=64.0):
     near = (f > f0 - 0.15) & (f < f0 + 0.15)
     out["bvp_snr"] = float(10 * np.log10(p[near].sum() / max(p[m].sum() - p[m & near].sum(), 1e-12)))
     return out
+
+# ---------- tętno bez RR (np. eksport co 1 s) ----------
+def hr_features(t, hr):
+    hr = np.asarray(hr, float); hr = hr[(hr > 30) & (hr < 220)]
+    return dict(hr=float(np.mean(hr)) if len(hr) >= 5 else np.nan)
+
+# ---------- Empatica: akcelerometr ----------
+def acc_features(t, g, fs=32.0):
+    """Średnia bezwzględna składowej zmiennej modułu przyspieszenia [g] - intensywność ruchu ręki."""
+    g = np.asarray(g, float)
+    if len(g) < fs * 5: return dict(acc_motion=np.nan)
+    b, a = signal.butter(2, 0.5, btype="high", fs=fs)
+    return dict(acc_motion=float(np.mean(np.abs(signal.filtfilt(b, a, g)))))

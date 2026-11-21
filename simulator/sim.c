@@ -11,6 +11,7 @@
  * Część B (wątki, priorytety, gniazda): start_thread(), send_line(), main()
  *
  * Protokół (tekstowy, jedna próbka = jedna linia):  NAZWA,t,wartość\n   ... END\n
+ * Wejście: pliki z sesje/<ID>/wyniki/strumienie/ (tworzy je analysis/process_session.py)
  *
  * Użycie: sim <host> <port> <speed> plik:NAZWA [plik:NAZWA ...]
  *   speed - mnożnik czasu (1 = czas rzeczywisty, 10 = 10x szybciej)

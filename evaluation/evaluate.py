@@ -1,65 +1,99 @@
 #!/usr/bin/env python3
-"""Ewaluacja (Moduł 3): zestawienie wskaźników obiektywnych z Raw NASA-TLX.
+"""Ewaluacja (Moduł 3): zestawienie wyników obiektywnych z ankietą (RTLX + wywiad).
 
-Użycie: evaluate.py [responses.csv]   (domyślnie responses.csv, a gdy go brak - SYNTHETIC)
-Kolumny responses.csv: participant,mental,physical,temporal,performance,effort,frustration (0-100)
-Wyniki: results/evaluation_summary.csv, results/correlations.csv, results/correlations.png,
-        results/validation_vs_truth.csv (tylko dane syntetyczne - prawda terenowa).
+    python evaluation/evaluate.py sesje
+
+Bierze każdą sesję, która ma wyniki/podsumowanie.json (po process_session.py) i ankieta_<ID>.json.
+Wyniki w sesje/_ewaluacja/:
+    zestawienie.csv     jeden wiersz na uczestnika: ankieta + miary obiektywne
+    korelacje.csv       Pearson i Spearman (r, p) dla każdej pary miara-ankieta
+    szczyty.csv         moment największego napięcia wg uczestnika vs szczyt wskaźnika
+    wykresy.png         wykresy rozrzutu
 """
-import sys, os, numpy as np, pandas as pd
+import glob, json, os, sys
+import numpy as np, pandas as pd
 from scipy import stats
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.join(HERE, "..")
-sys.path.insert(0, f"{ROOT}/analysis")
-from analyze_session import run
 
-SUBS = ["mental", "physical", "temporal", "performance", "effort", "frustration"]
-OBJ = ["load_index", "hr_polar", "rmssd", "lf_hf", "eda_tonic", "scr_rate", "n_objects", "motion_energy", "head_shift"]
+TLX = ["mental", "physical", "temporal", "performance", "effort", "frustration"]
+TARGETS = ["rtlx", "stres_1_5"] + TLX
+OBJ = ["load_index", "idx_fizjologia", "idx_ruch", "idx_scena", "peak_load_index",
+       "hr_delta", "rmssd_ratio", "eda_tonic_ratio", "scr_rate", "user_motion", "acc_motion",
+       "head_motion", "n_objects", "scene_dynamics"]
+MIN_N = 5
+PEAK_TOL_S = 60
 
-def features(p):
-    f = f"{ROOT}/results/features_{p}.csv"
-    if os.path.exists(f): return pd.read_csv(f)
-    return run(f"{ROOT}/data/{p}", f)
+
+def mmss(s):
+    try: m, x = str(s).split(":"); return int(m) * 60 + float(x)
+    except Exception: return np.nan
+
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else f"{HERE}/responses.csv"
-    synthetic = False
-    if not os.path.exists(path): path, synthetic = f"{HERE}/responses_SYNTHETIC.csv", True
-    R = pd.read_csv(path); R["rtlx"] = R[SUBS].mean(axis=1)               # Raw TLX = średnia bez ważenia
-    agg, val = [], []
-    for p in R.participant:
-        df = features(p)
-        row = {"participant": p, **{f"{c}_mean": df[c].mean() for c in OBJ}, "load_index_peak": df.load_index.max()}
-        agg.append(row)
-        if synthetic and os.path.exists(f"{ROOT}/data/{p}/truth.csv"):    # walidacja algorytmu wobec ukrytego s(t)
-            tr = np.loadtxt(f"{ROOT}/data/{p}/truth.csv", delimiter=",", skiprows=1)
-            s = [tr[(tr[:, 0] > t - 30) & (tr[:, 0] <= t), 1].mean() for t in df.t_end]
-            tc = [tr[(tr[:, 0] > t - 30) & (tr[:, 0] <= t), 2].mean() for t in df.t_end]
-            val.append(dict(participant=p, r_index_vs_truth=np.corrcoef(df.load_index, s)[0, 1],
-                            r_nobj_vs_truth=np.corrcoef(df.n_objects, tc)[0, 1]))
-    A = R.merge(pd.DataFrame(agg), on="participant"); A.to_csv(f"{ROOT}/results/evaluation_summary.csv", index=False)
-    rows = []
-    for tgt in ["rtlx"] + SUBS:
-        for m in [f"{c}_mean" for c in OBJ] + ["load_index_peak"]:
-            ok = A[[tgt, m]].dropna()
-            if len(ok) < 4: continue
+    root = sys.argv[1] if len(sys.argv) > 1 else "sesje"
+    out = os.path.join(root, "_ewaluacja"); os.makedirs(out, exist_ok=True)
+    rows, peaks, skipped = [], [], []
+    for d in sorted(glob.glob(os.path.join(root, "*", ""))):
+        sid = os.path.basename(os.path.normpath(d))
+        if sid.startswith(("_", ".")): continue
+        sp, ank = os.path.join(d, "wyniki", "podsumowanie.json"), sorted(glob.glob(os.path.join(d, "ankieta*.json")))
+        if not os.path.exists(sp) or not ank:
+            skipped.append(f"{sid}: " + ("brak wyników (uruchom process_session.py)" if not os.path.exists(sp) else "brak ankiety"))
+            continue
+        P = json.load(open(sp, encoding="utf-8")); A = json.load(open(ank[-1], encoding="utf-8"))
+        r = {"id": sid, **{k: A.get(k) for k in TARGETS}}
+        tm = P.get("task_mean", {})
+        for k in OBJ:
+            r[k] = P.get(k, tm.get(k))
+        rows.append(r)
+        declared = mmss(A.get("najwieksze_napiecie_czas", ""))
+        if np.isfinite(declared) and P.get("peak_time_s") is not None:
+            peaks.append(dict(id=sid, deklarowany_s=declared, szczyt_wskaznika_s=P["peak_time_s"],
+                              roznica_s=abs(declared - P["peak_time_s"])))
+    for s in skipped: print("pominięto", s)
+    if not rows:
+        print("Brak sesji z wynikami i ankietą."); return 1
+    Z = pd.DataFrame(rows); Z.to_csv(os.path.join(out, "zestawienie.csv"), index=False)
+    print(f"\nUczestników: {len(Z)}")
+    print(Z[["id", "rtlx", "stres_1_5", "load_index", "hr_delta", "eda_tonic_ratio"]].round(2).to_string(index=False))
+
+    res = []
+    for tgt in TARGETS:
+        for m in OBJ:
+            ok = Z[[tgt, m]].apply(pd.to_numeric, errors="coerce").dropna()
+            if len(ok) < MIN_N or ok[m].std() == 0 or ok[tgt].std() == 0: continue
             pr, pp = stats.pearsonr(ok[m], ok[tgt]); sr, sp = stats.spearmanr(ok[m], ok[tgt])
-            rows.append(dict(target=tgt, metric=m, n=len(ok), pearson_r=pr, pearson_p=pp, spearman_rho=sr, spearman_p=sp))
-    C = pd.DataFrame(rows); C.to_csv(f"{ROOT}/results/correlations.csv", index=False)
-    if val:
-        V = pd.DataFrame(val); V.to_csv(f"{ROOT}/results/validation_vs_truth.csv", index=False)
-        print("\nWalidacja wobec prawdy terenowej (średnia r w sesjach):\n", V.drop(columns="participant").mean().round(3).to_string())
-    top = C[C.target == "rtlx"].sort_values("pearson_r", ascending=False)
-    print(f"\nŹródło odpowiedzi: {os.path.basename(path)}{'  [DANE SYNTETYCZNE]' if synthetic else ''}")
-    print("\nKorelacje z RTLX (N=%d):\n" % len(A), top.round(3).to_string(index=False))
-    fig, ax = plt.subplots(1, 3, figsize=(13, 4))
-    for a, m, lab in zip(ax, ["load_index_mean", "hr_polar_mean", "eda_tonic_mean"], ["Wskaźnik obciążenia (0-100)", "HR Polar [bpm]", "EDA tonic [µS]"]):
-        a.scatter(A[m], A.rtlx, s=40); k = np.polyfit(A[m], A.rtlx, 1); xs = np.linspace(A[m].min(), A[m].max(), 10)
-        a.plot(xs, np.polyval(k, xs), "r--"); r = np.corrcoef(A[m], A.rtlx)[0, 1]
-        a.set_xlabel(lab); a.set_ylabel("Raw TLX"); a.set_title(f"r = {r:.2f}")
-        for _, rw in A.iterrows(): a.annotate(rw.participant[1:], (rw[m], rw.rtlx), fontsize=7, xytext=(3, 3), textcoords="offset points")
-    if synthetic: fig.suptitle("DANE SYNTETYCZNE - ilustracja potoku, nie wynik badania", color="red")
-    fig.tight_layout(); fig.savefig(f"{ROOT}/results/correlations.png", dpi=130)
+            res.append(dict(ankieta=tgt, miara=m, n=len(ok), pearson_r=pr, pearson_p=pp, spearman_rho=sr, spearman_p=sp))
+    if res:
+        K = pd.DataFrame(res); K.to_csv(os.path.join(out, "korelacje.csv"), index=False)
+        print("\nKorelacje z RTLX (Spearman, sortowane):")
+        print(K[K.ankieta == "rtlx"].sort_values("spearman_rho", key=abs, ascending=False)
+              [["miara", "n", "spearman_rho", "spearman_p", "pearson_r"]].round(3).to_string(index=False))
+        print("\nUwaga: przy małej liczbie osób p < 0.05 dla wielu par może wyjść przypadkiem - patrz README.")
+    else:
+        print(f"\nZa mało uczestników do korelacji (potrzeba co najmniej {MIN_N}).")
+
+    if peaks:
+        Pk = pd.DataFrame(peaks); Pk.to_csv(os.path.join(out, "szczyty.csv"), index=False)
+        print(f"\nSzczyt napięcia wg uczestnika vs szczyt wskaźnika: mediana różnicy {Pk.roznica_s.median():.0f} s, "
+              f"w granicach ±{PEAK_TOL_S} s: {(Pk.roznica_s <= PEAK_TOL_S).sum()}/{len(Pk)}")
+
+    cols = [c for c in ("load_index", "idx_fizjologia", "hr_delta", "eda_tonic_ratio") if Z[c].notna().sum() >= 2]
+    if cols and Z.rtlx.notna().sum() >= 2:
+        fig, ax = plt.subplots(1, len(cols), figsize=(4.2 * len(cols), 3.8)); ax = np.atleast_1d(ax)
+        for a, c in zip(ax, cols):
+            ok = Z[["id", c, "rtlx"]].dropna()
+            a.scatter(ok[c], ok.rtlx, s=40)
+            for _, w in ok.iterrows(): a.annotate(w.id, (w[c], w.rtlx), fontsize=7, xytext=(3, 3), textcoords="offset points")
+            if len(ok) >= 3:
+                k = np.polyfit(ok[c].astype(float), ok.rtlx.astype(float), 1); xs = np.linspace(ok[c].min(), ok[c].max(), 10)
+                a.plot(xs, np.polyval(k, xs), "r--", lw=1)
+                a.set_title(f"rho = {stats.spearmanr(ok[c], ok.rtlx)[0]:.2f} (n={len(ok)})", fontsize=9)
+            a.set_xlabel(c); a.set_ylabel("Raw TLX")
+        fig.tight_layout(); fig.savefig(os.path.join(out, "wykresy.png"), dpi=130)
+    print(f"\nWyniki: {out}")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

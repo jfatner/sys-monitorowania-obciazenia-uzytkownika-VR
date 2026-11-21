@@ -19,7 +19,7 @@
 
 ## Zaraz po sesji
 1. **Ankieta → Otwórz formularz.** Uczestnik wypełnia suwaki, prowadzący wpisuje odpowiedzi z wywiadu.
-   Moment największego napięcia podaj jako mm:ss od startu nagrania. **Zapisz**, potem w aplikacji **Wczytaj z Pobranych**.
+   Moment największego napięcia podaj jako mm:ss od startu nagrania. **Zapisz** - ankieta trafia od razu do aplikacji.
 
 ## Po zajęciach
 1. **Dodaj pliki Polar**: pliki `_HR.txt` i `_PPI.txt` z tej sesji (z folderu zapisu Polar Sensor Loggera w telefonie).

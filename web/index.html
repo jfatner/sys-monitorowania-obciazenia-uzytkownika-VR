@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor obciążenia VR</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Cpath d='M5 17h5l3-7 4 13 3-9 2 3h5' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M5 17h5l3-7 4 13 3-9 2 3h5"/></svg>
+    <div>
+      <div class="brand-name">Monitor obciążenia VR</div>
+      <div class="brand-sub">analiza biometryczno-wizualna</div>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-view="p">Uczestnicy</button>
+    <button class="tab" data-view="eval">Zestawienie</button>
+  </nav>
+  <button class="icon-btn" id="btn-settings" title="Ustawienia kamer">
+    <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+  </button>
+</header>
+
+<div class="layout" id="view-p">
+  <aside class="sidebar">
+    <div class="side-head">
+      <span>Uczestnicy</span>
+      <span class="count" id="p-count">0</span>
+    </div>
+    <input class="search" id="p-search" placeholder="Szukaj…" autocomplete="off">
+    <ul class="plist" id="p-list"></ul>
+    <button class="btn primary block" id="btn-new">+ Nowy uczestnik</button>
+  </aside>
+  <main class="main" id="p-main">
+    <div class="empty-state" id="p-empty">
+      <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <h2>Wybierz uczestnika</h2>
+      <p>albo dodaj nowego, żeby rozpocząć sesję.</p>
+    </div>
+    <div id="p-detail" hidden></div>
+  </main>
+</div>
+
+<div class="layout single" id="view-eval" hidden>
+  <main class="main" id="eval-main"></main>
+</div>
+
+<div class="dock" id="dock" hidden></div>
+<div class="modal-back" id="modal" hidden><div class="modal" id="modal-box"></div></div>
+<div class="lightbox" id="lightbox" hidden><img id="lb-img" alt=""><button class="lb-nav prev" id="lb-prev">‹</button><button class="lb-nav next" id="lb-next">›</button><div class="lb-cap" id="lb-cap"></div></div>
+<div class="toasts" id="toasts"></div>
+<input type="file" id="file-in" multiple hidden>
+<input type="file" id="dir-in" webkitdirectory multiple hidden>
+<script src="/static/app.js"></script>
+</body>
+</html>

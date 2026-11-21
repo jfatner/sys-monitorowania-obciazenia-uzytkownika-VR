@@ -1,86 +1,110 @@
 #!/usr/bin/env python3
-"""Aplikacja do prowadzenia badania (okienka tkinter): uczestnicy, nagrywanie, pliki z opasek,
-fragment, ankieta, analiza.
+"""Monitor obciążenia VR - aplikacja w przeglądarce.
+
+Działa w całości lokalnie, na Twoim komputerze (bez internetu i bez dodatkowych bibliotek):
+mały serwer w Pythonie + strona otwierana w przeglądarce.
 
 Uruchomienie (z głównego folderu projektu, w środowisku vr):
     python app.py
+Zamknięcie: Ctrl+C w terminalu.
+
+Klasyczna wersja w okienkach: python app_tk.py
 """
-import glob, json, os, pathlib, re, shutil, subprocess, sys, threading, time, queue, webbrowser
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-from tkinter.scrolledtext import ScrolledText
+import glob, json, mimetypes, os, re, shutil, socket, subprocess, sys, threading, time, urllib.parse, webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SESJE = os.path.join(ROOT, "sesje")
+WEB = os.path.join(ROOT, "web")
 SETTINGS = os.path.join(ROOT, "app_settings.json")
-PY = os.environ.get("VR_PYTHON", sys.executable)          # ten sam Python (środowisko vr) dla skryptów
+PY = os.environ.get("VR_PYTHON", sys.executable)
 DEFAULTS = {"laptop_cam": "0", "quest_cam": "1", "dshow": True}
+ID_RE = re.compile(r"^[\w\-]{1,40}$")
+STEPS = ["nagranie", "polar", "empatica", "fragment", "ankieta", "analiza"]
 
 
-def open_path(p):
-    if not os.path.exists(p):
-        messagebox.showinfo("Brak", f"Nie ma jeszcze:\n{p}"); return
-    if sys.platform.startswith("win"):
-        os.startfile(p)                                  # noqa  (tylko Windows)
-    else:
-        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", p])
-
+# ======================= pomocnicze =======================
 
 def conda_paths():
-    """Foldery, które 'conda activate' dodaje do PATH - bez nich na Windows biblioteki (numpy/scipy)
-    mogą nie znaleźć swoich DLL, gdy aplikacja jest uruchomiona bez aktywacji środowiska."""
+    """Foldery, które 'conda activate' dodaje do PATH (na Windows bez nich numpy/scipy nie znajdą DLL)."""
     pre = os.path.dirname(os.path.abspath(PY))
     if os.path.basename(pre).lower() in ("bin", "scripts"):
         pre = os.path.dirname(pre)
-    cands = [pre, os.path.join(pre, "Library", "mingw-w64", "bin"), os.path.join(pre, "Library", "usr", "bin"),
-             os.path.join(pre, "Library", "bin"), os.path.join(pre, "Scripts"), os.path.join(pre, "bin")]
-    return [c for c in cands if os.path.isdir(c)]
+    c = [pre, os.path.join(pre, "Library", "mingw-w64", "bin"), os.path.join(pre, "Library", "usr", "bin"),
+         os.path.join(pre, "Library", "bin"), os.path.join(pre, "Scripts"), os.path.join(pre, "bin")]
+    return [x for x in c if os.path.isdir(x)]
 
 
-def mmss_to_s(txt):
-    txt = txt.strip()
-    m = re.fullmatch(r"(\d{1,3}):(\d{1,2}(?:\.\d+)?)", txt)
-    if m: return int(m.group(1)) * 60 + float(m.group(2))
-    if re.fullmatch(r"\d+(\.\d+)?", txt): return float(txt)
-    raise ValueError(txt)
+def open_local(path):
+    """Otwiera plik/folder w systemie (Eksplorator, odtwarzacz, przeglądarka obrazów)."""
+    if not os.path.exists(path):
+        return False
+    if sys.platform.startswith("win"):
+        os.startfile(path)                                    # noqa: tylko Windows
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
 
 
-def s_to_mmss(s):
-    return f"{int(s // 60):02d}:{int(round(s % 60)):02d}"
+def read_json(p, default=None):
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
+
+def settings():
+    return {**DEFAULTS, **(read_json(SETTINGS, {}) or {})}
+
+
+def safe_join(base, *parts):
+    """Ścieżka wewnątrz base (bez wychodzenia '..')."""
+    p = os.path.realpath(os.path.join(base, *parts))
+    if p != os.path.realpath(base) and not p.startswith(os.path.realpath(base) + os.sep):
+        raise PermissionError(p)
+    return p
+
+
+def clean_name(n):
+    n = os.path.basename(n.replace("\\", "/"))
+    n = re.sub(r"[^\w\-. ()]", "_", n).strip(" .")
+    return n or "plik"
+
+
+# ======================= uczestnik =======================
 
 class Participant:
     def __init__(self, pid):
-        self.id = pid; self.dir = os.path.join(SESJE, pid)
+        if not ID_RE.match(pid):
+            raise ValueError("zły kod uczestnika")
+        self.id = pid
+        self.dir = os.path.join(SESJE, pid)
+
+    def exists(self):
+        return os.path.isdir(self.dir)
 
     def info(self):
-        p = os.path.join(self.dir, "info.json")
-        try: return json.load(open(p, encoding="utf-8"))
-        except Exception: return {}
+        return read_json(os.path.join(self.dir, "info.json"), {}) or {}
 
     def save_info(self, d):
-        json.dump(d, open(os.path.join(self.dir, "info.json"), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+        with open(os.path.join(self.dir, "info.json"), "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2, ensure_ascii=False)
 
-    def has_files(self, sub):
+    def files(self, sub):
         d = os.path.join(self.dir, sub)
-        return os.path.isdir(d) and any(os.path.isfile(f) for f in glob.glob(os.path.join(d, "**", "*"), recursive=True))
-
-    def status(self):
-        info = self.info()
-        return {
-            "nagranie": os.path.exists(os.path.join(self.dir, "frames.csv")),
-            "polar": self.has_files("polar"),
-            "empatica": self.has_files("empatica"),
-            "fragment": bool(info.get("fragment_s")),
-            "ankieta": bool(glob.glob(os.path.join(self.dir, "ankieta*.json"))),
-            "analiza": os.path.exists(os.path.join(self.dir, "wyniki", "podsumowanie.json")),
-        }
+        out = []
+        for p in sorted(glob.glob(os.path.join(d, "**", "*"), recursive=True)):
+            if os.path.isfile(p) and "digital_biomarkers" not in p.replace("\\", "/"):
+                out.append({"name": os.path.relpath(p, d).replace("\\", "/"), "size": os.path.getsize(p)})
+        return out
 
     def duration(self):
         info = self.info()
         if info.get("recording_end_unix") and info.get("recording_start_unix"):
             return info["recording_end_unix"] - info["recording_start_unix"]
-        f = os.path.join(self.dir, "frames.csv")                # zapas: z czasów klatek
+        f = os.path.join(self.dir, "frames.csv")
         if os.path.exists(f):
             try:
                 with open(f) as fh:
@@ -90,361 +114,489 @@ class Participant:
                 return None
         return None
 
-
-STATUS_LABELS = [("nagranie", "Nagranie"), ("polar", "Polar"), ("empatica", "Empatica"),
-                 ("fragment", "Fragment"), ("ankieta", "Ankieta"), ("analiza", "Analiza")]
-
-
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Monitor obciążenia VR")
-        self.geometry("1060x700"); self.minsize(900, 600)
-        os.makedirs(SESJE, exist_ok=True)
-        self.settings = {**DEFAULTS, **(json.load(open(SETTINGS)) if os.path.exists(SETTINGS) else {})}
-        self.proc_q = queue.Queue(); self.busy = False
-        self._build()
-        self.refresh_list()
-        self.after(150, self._pump)
-
-    # ---------------- interfejs ----------------
-    def _build(self):
-        style = ttk.Style(self)
-        try: style.theme_use("clam")
-        except tk.TclError: pass
-        style.configure("H.TLabel", font=("Segoe UI", 13, "bold"))
-        style.configure("Ok.TLabel", foreground="#1b7f3b"); style.configure("No.TLabel", foreground="#9a9a9a")
-        style.configure("Big.TButton", padding=(10, 6))
-
-        main = ttk.PanedWindow(self, orient="horizontal"); main.pack(fill="both", expand=True, padx=8, pady=8)
-
-        # --- lewa: uczestnicy ---
-        left = ttk.Frame(main, padding=4); main.add(left, weight=1)
-        ttk.Label(left, text="Uczestnicy", style="H.TLabel").pack(anchor="w")
-        self.lb = tk.Listbox(left, font=("Consolas", 11), activestyle="none", exportselection=False)
-        self.lb.pack(fill="both", expand=True, pady=4)
-        self.lb.bind("<<ListboxSelect>>", lambda e: self.show_selected())
-        ttk.Button(left, text="+ Dodaj uczestnika", command=self.add_participant).pack(fill="x")
-        ttk.Button(left, text="Ustawienia kamer", command=self.edit_settings).pack(fill="x", pady=(4, 0))
-        ttk.Separator(left).pack(fill="x", pady=8)
-        ttk.Button(left, text="Zestawienie wszystkich\n(korelacje z ankietami)", command=self.run_eval,
-                   style="Big.TButton").pack(fill="x")
-
-        # --- prawa: wybrany uczestnik ---
-        right = ttk.Frame(main, padding=(10, 4)); main.add(right, weight=3)
-        self.title_lbl = ttk.Label(right, text="Wybierz albo dodaj uczestnika", style="H.TLabel"); self.title_lbl.pack(anchor="w")
-        st = ttk.Frame(right); st.pack(anchor="w", pady=(4, 8))
-        self.st_lbls = {}
-        for k, name in STATUS_LABELS:
-            l = ttk.Label(st, text=f"○ {name}", style="No.TLabel"); l.pack(side="left", padx=(0, 14)); self.st_lbls[k] = l
-
-        steps = ttk.Frame(right); steps.pack(fill="x")
-        steps.columnconfigure(1, weight=1)
-        r = 0
-        def row(num, text):
-            nonlocal r
-            ttk.Label(steps, text=f"{num}.", width=3).grid(row=r, column=0, sticky="nw", pady=4)
-            f = ttk.Frame(steps); f.grid(row=r, column=1, sticky="ew", pady=4)
-            ttk.Label(f, text=text, width=24).pack(side="left")
-            r += 1
-            return f
-
-        f = row(1, "Nagranie sesji")
-        self.b_rec = ttk.Button(f, text="Nagraj sesję", command=self.record); self.b_rec.pack(side="left")
-        ttk.Button(f, text="Obejrzyj nagranie", command=lambda: self._open_in("app.mp4")).pack(side="left", padx=4)
-        ttk.Button(f, text="Kamera", command=lambda: self._open_in("webcam.mp4")).pack(side="left")
-
-        f = row(2, "Pliki z opasek")
-        ttk.Button(f, text="Dodaj pliki Polar…", command=lambda: self.add_files("polar", [("Polar", "*.txt *.csv"), ("Wszystkie", "*.*")])).pack(side="left")
-        ttk.Button(f, text="Dodaj pliki Empatica…", command=lambda: self.add_files("empatica", [("Empatica", "*.zip *.csv *.avro"), ("Wszystkie", "*.*")])).pack(side="left", padx=4)
-        ttk.Button(f, text="Dodaj folder Empatica…", command=self.add_emp_folder).pack(side="left")
-
-        f = row(3, "Fragment do analizy")
-        ttk.Label(f, text="od").pack(side="left")
-        self.e_from = ttk.Entry(f, width=7); self.e_from.pack(side="left", padx=3)
-        ttk.Label(f, text="do").pack(side="left")
-        self.e_to = ttk.Entry(f, width=7); self.e_to.pack(side="left", padx=3)
-        ttk.Label(f, text="(mm:ss)").pack(side="left")
-        ttk.Button(f, text="Zapisz", command=self.save_fragment).pack(side="left", padx=4)
-        ttk.Button(f, text="Cała sesja", command=self.clear_fragment).pack(side="left")
-        self.dur_lbl = ttk.Label(f, text="", style="No.TLabel"); self.dur_lbl.pack(side="left", padx=8)
-
-        f = row(4, "Ankieta")
-        ttk.Button(f, text="Otwórz formularz", command=lambda: webbrowser.open(pathlib.Path(ROOT, "evaluation", "ankieta.html").as_uri())).pack(side="left")
-        ttk.Button(f, text="Wczytaj z Pobranych", command=self.import_survey).pack(side="left", padx=4)
-        ttk.Button(f, text="Wskaż plik…", command=self.import_survey_manual).pack(side="left")
-
-        f = row(5, "Analiza")
-        self.b_an = ttk.Button(f, text="▶ Analizuj", command=self.analyze, style="Big.TButton"); self.b_an.pack(side="left")
-        ttk.Button(f, text="Wykres", command=lambda: self._open_in("wyniki", "przebieg.png")).pack(side="left", padx=4)
-        ttk.Button(f, text="Klatki", command=lambda: self._open_in("wyniki", "klatki")).pack(side="left")
-        ttk.Button(f, text="Folder sesji", command=lambda: self._open_in()).pack(side="left", padx=4)
-
-        pf = ttk.Frame(right); pf.pack(fill="x", pady=(12, 0))
-        style = ttk.Style(self); style.configure("Pct.TLabel", font=("Segoe UI", 14, "bold"))
-        bar_row = ttk.Frame(pf); bar_row.pack(fill="x")
-        self.pct_lbl = ttk.Label(bar_row, text="0%", style="Pct.TLabel", width=5, anchor="e"); self.pct_lbl.pack(side="right", padx=(8, 0))
-        self.pbar = ttk.Progressbar(bar_row, mode="determinate", maximum=100); self.pbar.pack(side="left", fill="x", expand=True, ipady=4)
-        self.plbl = ttk.Label(pf, text="", style="No.TLabel"); self.plbl.pack(anchor="w")
-
-        ttk.Label(right, text="Komunikaty", style="H.TLabel").pack(anchor="w", pady=(8, 2))
-        self.log = ScrolledText(right, height=14, font=("Consolas", 9), wrap="word", state="disabled")
-        self.log.pack(fill="both", expand=True)
-        self.log.tag_configure("warn", foreground="#b35c00"); self.log.tag_configure("err", foreground="#c0392b")
-        self.log.tag_configure("ok", foreground="#1b7f3b")
-
-    # ---------------- pomocnicze ----------------
-    def write(self, text, tag=None):
-        self.log.configure(state="normal")
-        self.log.insert("end", text if text.endswith("\n") else text + "\n", tag)
-        self.log.see("end"); self.log.configure(state="disabled")
-
-    def current(self):
-        sel = self.lb.curselection()
-        if not sel:
-            messagebox.showinfo("Uczestnik", "Najpierw wybierz uczestnika z listy."); return None
-        return Participant(self.ids[sel[0]])
-
-    def _open_in(self, *parts):
-        p = self.current()
-        if p: open_path(os.path.join(p.dir, *parts))
-
-    def refresh_list(self, select=None):
-        prev = select or (self.ids[self.lb.curselection()[0]] if getattr(self, "ids", None) and self.lb.curselection() else None)
-        self.ids = sorted(d for d in os.listdir(SESJE) if os.path.isdir(os.path.join(SESJE, d)) and not d.startswith(("_", ".")))
-        self.lb.delete(0, "end")
-        for pid in self.ids:
-            s = Participant(pid).status()
-            marks = "".join("●" if s[k] else "·" for k, _ in STATUS_LABELS)
-            self.lb.insert("end", f"{pid:<12} {marks}")
-        if prev in self.ids:
-            i = self.ids.index(prev); self.lb.selection_set(i); self.lb.see(i)
-        self.show_selected()
-
-    def show_selected(self):
-        sel = self.lb.curselection()
-        if not sel:
-            return
-        p = Participant(self.ids[sel[0]]); s = p.status()
-        self.title_lbl.configure(text=f"Uczestnik {p.id}")
-        for k, name in STATUS_LABELS:
-            self.st_lbls[k].configure(text=f"{'✔' if s[k] else '○'} {name}", style="Ok.TLabel" if s[k] else "No.TLabel")
-        fr = p.info().get("fragment_s")
-        for e, v in ((self.e_from, fr[0] if fr else None), (self.e_to, fr[1] if fr else None)):
-            e.delete(0, "end")
-            if v is not None: e.insert(0, s_to_mmss(v))
-        d = p.duration()
-        self.dur_lbl.configure(text=f"nagranie: {s_to_mmss(d)}" if d else "")
-
-    # ---------------- akcje ----------------
-    def add_participant(self):
-        n = len(self.ids) + 1
-        sugg = next(f"P{i:02d}" for i in range(n, n + 1000) if f"P{i:02d}" not in self.ids)
-        pid = simpledialog.askstring("Nowy uczestnik", "Kod uczestnika (bez imienia i nazwiska):", initialvalue=sugg, parent=self)
-        if not pid: return
-        pid = pid.strip()
-        if not re.fullmatch(r"[\w\-]{1,40}", pid):
-            messagebox.showerror("Kod", "Kod może zawierać litery, cyfry, '-' i '_' (bez spacji)."); return
-        if pid in self.ids:
-            messagebox.showerror("Kod", f"{pid} już istnieje."); return
-        os.makedirs(os.path.join(SESJE, pid, "polar")); os.makedirs(os.path.join(SESJE, pid, "empatica"))
-        Participant(pid).save_info({"participant": pid})
-        self.write(f"Dodano uczestnika {pid}", "ok"); self.refresh_list(select=pid)
-
-    def edit_settings(self):
-        w = tk.Toplevel(self); w.title("Ustawienia kamer"); w.transient(self); w.grab_set()
-        vals = {}
-        for i, (k, lab) in enumerate((("laptop_cam", "Numer kamery laptopa"), ("quest_cam", "Numer kamery OBS (gogle) albo 'brak'"))):
-            ttk.Label(w, text=lab).grid(row=i, column=0, sticky="w", padx=8, pady=4)
-            e = ttk.Entry(w, width=6); e.insert(0, str(self.settings[k])); e.grid(row=i, column=1, padx=8); vals[k] = e
-        dv = tk.BooleanVar(value=self.settings["dshow"])
-        ttk.Checkbutton(w, text="DirectShow (Windows, szybsze otwieranie kamer)", variable=dv).grid(row=2, column=0, columnspan=2, sticky="w", padx=8)
-        def test():
-            self.run_script([os.path.join(ROOT, "nagrywanie", "record_session.py"), "--list-cameras"] + (["--dshow"] if dv.get() else []), "Kamery")
-        def save():
-            self.settings.update({k: e.get().strip() for k, e in vals.items()}, dshow=dv.get())
-            json.dump(self.settings, open(SETTINGS, "w"), indent=2); w.destroy()
-        ttk.Button(w, text="Sprawdź dostępne kamery", command=test).grid(row=3, column=0, padx=8, pady=8, sticky="w")
-        ttk.Button(w, text="Zapisz", command=save).grid(row=3, column=1, padx=8, pady=8)
-
-    def record(self):
-        p = self.current()
-        if not p: return
-        if p.status()["nagranie"]:
-            if not messagebox.askyesno("Nagranie istnieje", f"{p.id} ma już nagranie. Przenieść stare pliki do folderu 'stare_nagranie' i nagrać od nowa?"):
-                return
-            old = os.path.join(p.dir, "stare_nagranie"); os.makedirs(old, exist_ok=True)
-            for fn in ("app.mp4", "webcam.mp4", "frames.csv", "events.csv"):
-                if os.path.exists(os.path.join(p.dir, fn)): shutil.move(os.path.join(p.dir, fn), os.path.join(old, fn))
-        self.write(f"\n=== Nagrywanie {p.id} ===\nW oknie podglądu: R = start/stop nagrywania, T = start zadania "
-                   f"(koniec spoczynku), Q = koniec. Instrukcja klawiszy jest też na dole okna.", "ok")
-        args = [os.path.join(ROOT, "nagrywanie", "record_session.py"), "--id", p.id, "--root", SESJE,
-                "--laptop-cam", str(self.settings["laptop_cam"]), "--quest-cam", str(self.settings["quest_cam"])]
-        if self.settings.get("dshow") and sys.platform.startswith("win"): args.append("--dshow")
-        self.run_script(args, "Nagrywanie")
-
-    def add_files(self, sub, types):
-        p = self.current()
-        if not p: return
-        files = filedialog.askopenfilenames(title=f"Pliki {sub} dla {p.id}", filetypes=types, parent=self)
-        if not files: return
-        dst = os.path.join(p.dir, sub); os.makedirs(dst, exist_ok=True)
-        for f in files:
-            shutil.copy2(f, dst); self.write(f"skopiowano do {sub}/: {os.path.basename(f)}")
-        self.refresh_list()
-
-    def add_emp_folder(self):
-        p = self.current()
-        if not p: return
-        src = filedialog.askdirectory(title=f"Folder z eksportem Empatiki dla {p.id}", parent=self)
-        if not src: return
-        dst = os.path.join(p.dir, "empatica", os.path.basename(src.rstrip("/\\")))
-        shutil.copytree(src, dst, dirs_exist_ok=True); self.write(f"skopiowano folder do empatica/: {os.path.basename(dst)}")
-        self.refresh_list()
-
-    def save_fragment(self):
-        p = self.current()
-        if not p: return
+    def events(self):
+        """Znaczniki z nagrywarki (SYNC, TASK_START, EVENT) w sekundach od startu nagrania."""
+        ev, fr = os.path.join(self.dir, "events.csv"), os.path.join(self.dir, "frames.csv")
+        if not (os.path.exists(ev) and os.path.exists(fr)):
+            return []
         try:
-            a, b = mmss_to_s(self.e_from.get()), mmss_to_s(self.e_to.get())
-        except ValueError:
-            messagebox.showerror("Fragment", "Wpisz czas jako mm:ss, np. 03:20"); return
-        d = p.duration()
-        if b <= a or (d and a >= d):
-            messagebox.showerror("Fragment", "Koniec musi być po początku i w obrębie nagrania."); return
-        info = p.info(); info["fragment_s"] = [a, min(b, d) if d else b]; p.save_info(info)
-        self.write(f"{p.id}: fragment {s_to_mmss(a)}–{s_to_mmss(info['fragment_s'][1])} zapisany", "ok"); self.refresh_list()
-
-    def clear_fragment(self):
-        p = self.current()
-        if not p: return
-        info = p.info(); info.pop("fragment_s", None); p.save_info(info)
-        self.write(f"{p.id}: analiza całej sesji (bez fragmentu)"); self.refresh_list()
-
-    def import_survey(self):
-        p = self.current()
-        if not p: return
-        cands = []
-        for d in (os.path.join(os.path.expanduser("~"), "Downloads"), os.path.join(os.path.expanduser("~"), "Pobrane")):
-            cands += glob.glob(os.path.join(d, f"ankieta_{p.id}*.json"))
-        if not cands:
-            messagebox.showinfo("Ankieta", f"Nie znalazłem ankieta_{p.id}.json w Pobranych. Użyj 'Wskaż plik…'."); return
-        self._take_survey(p, max(cands, key=os.path.getmtime))
-
-    def import_survey_manual(self):
-        p = self.current()
-        if not p: return
-        f = filedialog.askopenfilename(title="Plik ankiety", filetypes=[("Ankieta", "*.json")], parent=self)
-        if f: self._take_survey(p, f)
-
-    def _take_survey(self, p, f):
-        try:
-            d = json.load(open(f, encoding="utf-8"))
-        except Exception as e:
-            messagebox.showerror("Ankieta", f"Nie da się odczytać pliku: {e}"); return
-        if d.get("id") and d["id"] != p.id and not messagebox.askyesno("Ankieta", f"Ankieta jest dla {d['id']}, a wybrany jest {p.id}. Mimo to przypisać?"):
-            return
-        shutil.copy2(f, os.path.join(p.dir, f"ankieta_{p.id}.json"))
-        self.write(f"{p.id}: wczytano ankietę (RTLX = {d.get('rtlx')})", "ok"); self.refresh_list()
-
-    def analyze(self):
-        p = self.current()
-        if not p: return
-        s = p.status()
-        if not (s["nagranie"] or s["polar"] or s["empatica"]):
-            messagebox.showinfo("Analiza", "Brak danych: najpierw nagranie i/lub pliki z opasek."); return
-        self.write(f"\n=== Analiza {p.id} ===")
-        self.run_script([os.path.join(ROOT, "analysis", "process_session.py"), p.dir], "Analiza",
-                        on_done=lambda ok: ok and os.path.exists(os.path.join(p.dir, "wyniki", "przebieg.png"))
-                        and open_path(os.path.join(p.dir, "wyniki", "przebieg.png")))
-
-    def run_eval(self):
-        self.write("\n=== Zestawienie wszystkich uczestników ===")
-        self.run_script([os.path.join(ROOT, "evaluation", "evaluate.py"), SESJE], "Zestawienie",
-                        on_done=lambda ok: ok and open_path(os.path.join(SESJE, "_ewaluacja")))
-
-    # ---------------- uruchamianie skryptów w tle ----------------
-    def run_script(self, args, name, on_done=None):
-        if self.busy:
-            messagebox.showinfo("Zajęte", "Poczekaj, aż skończy się poprzednie zadanie."); return
-        self.busy = True; self.t_job = time.time(); self.job_name = name; self.got_progress = False
-        for b in (self.b_rec, self.b_an): b.state(["disabled"])
-        self.pbar.configure(mode="indeterminate", value=0); self.pbar.start(12); self.pct_lbl.configure(text="…")
-        self.plbl.configure(text=f"{name}: pracuję…")
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "VR_PROGRESS": "1"}
-        env["PATH"] = os.pathsep.join(conda_paths() + [env.get("PATH", "")])   # jak "conda activate" (DLL-e)
-
-        def work():
-            try:
-                pr = subprocess.Popen([PY, "-u", "-X", "faulthandler"] + args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                      env=env, text=True, encoding="utf-8", errors="replace",
-                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                for line in pr.stdout:
-                    self.proc_q.put(("line", line.rstrip("\n")))
-                code = pr.wait()
-            except Exception as e:
-                self.proc_q.put(("line", f"BŁĄD uruchomienia: {e}")); code = -1
-            self.proc_q.put(("done", (name, code, on_done)))
-        threading.Thread(target=work, daemon=True).start()
-
-    @staticmethod
-    def _fmt(s):
-        s = int(round(s))
-        return f"{s // 60} min {s % 60:02d} s" if s >= 60 else f"{s} s"
-
-    def _pump(self):
-        try:
-            while True:
-                kind, val = self.proc_q.get_nowait()
-                if kind == "line" and val.startswith("@@PROGRESS"):
-                    parts = val.split(" ", 2)
-                    try: pct = float(parts[1])
-                    except (IndexError, ValueError): continue
-                    label = parts[2] if len(parts) > 2 else ""
-                    if not self.got_progress:
-                        self.got_progress = True; self.pbar.stop(); self.pbar.configure(mode="determinate")
-                    self.pbar.configure(value=pct); self.pct_lbl.configure(text=f"{pct:.0f}%")
-                    el = time.time() - self.t_job
-                    eta = f" · zostało ok. {self._fmt(el * (100 - pct) / pct)}" if 3 <= pct < 100 and el > 3 else ""
-                    self.plbl.configure(text=f"{self.job_name}: {label} - {pct:.0f}%{eta}")
-                    continue
-                if kind == "line":
-                    tag = "warn" if val.strip().startswith("!") else ("err" if "BŁĄD" in val or "Traceback" in val or "Error" in val else None)
-                    self.write(val, tag)
-                else:
-                    name, code, cb = val
-                    self.busy = False
-                    self.pbar.stop(); self.pbar.configure(mode="determinate", value=100 if code == 0 else 0)
-                    self.pct_lbl.configure(text="100%" if code == 0 else "✖")
-                    self.plbl.configure(text=f"{name}: {'gotowe' if code == 0 else 'błąd - szczegóły w komunikatach'} "
-                                             f"({self._fmt(time.time() - self.t_job)})")
-                    for b in (self.b_rec, self.b_an): b.state(["!disabled"])
-                    self.write(f"{name}: {'zakończono' if code == 0 else f'zakończono z błędem (kod {code})'}", "ok" if code == 0 else "err")
-                    if code not in (0, 1, 2, -1):
-                        self.write("To błąd systemu Windows (np. brak pliku DLL), a nie błąd danych. Uruchom aplikację z terminala "
-                                   "z aktywnym środowiskiem (conda activate D:\\srodowiska\\vr, potem python app.py) "
-                                   "i przyślij komunikaty.", "warn")
-                    self.refresh_list()
-                    if cb: cb(code == 0)
-        except queue.Empty:
-            pass
-        self.after(150, self._pump)
-
-
-def enable_dpi_awareness():
-    """Windows: bez tego przy skalowaniu ekranu 125-150% okno jest rozciągane jak obrazek i wygląda na rozmyte."""
-    if not sys.platform.startswith("win"):
-        return
-    import ctypes
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)      # per-monitor DPI aware
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
+            with open(fr) as f:
+                f.readline(); t0 = float(f.readline().split(",")[1])
+            out = []
+            with open(ev, encoding="utf-8") as f:
+                for line in f.read().splitlines()[1:]:
+                    if line.strip():
+                        t, name = line.split(",", 1)
+                        out.append({"t": round(float(t) - t0, 1), "name": name.strip()})
+            return out
         except Exception:
+            return []
+
+    def survey(self):
+        a = sorted(glob.glob(os.path.join(self.dir, "ankieta*.json")))
+        return read_json(a[-1]) if a else None
+
+    def summary(self):
+        return read_json(os.path.join(self.dir, "wyniki", "podsumowanie.json"))
+
+    def status(self):
+        return {
+            "nagranie": os.path.exists(os.path.join(self.dir, "frames.csv")),
+            "polar": bool(self.files("polar")),
+            "empatica": bool(self.files("empatica")),
+            "fragment": bool(self.info().get("fragment_s")),
+            "ankieta": self.survey() is not None,
+            "analiza": self.summary() is not None,
+        }
+
+    def brief(self):
+        s, sv, sm = self.status(), self.survey(), self.summary()
+        return {"id": self.id, "status": s, "done": sum(s.values()),
+                "rtlx": (sv or {}).get("rtlx"),
+                "peak": (sm or {}).get("peak_load_index"),
+                "warnings": len((sm or {}).get("warnings", []))}
+
+    def detail(self):
+        d = self.brief()
+        info, sm, sv = self.info(), self.summary(), self.survey()
+        wyn = os.path.join(self.dir, "wyniki")
+        plot = os.path.join(wyn, "przebieg.png")
+        d.update(
+            duration=self.duration(), fragment=info.get("fragment_s"),
+            has_app_video=os.path.exists(os.path.join(self.dir, "app.mp4")),
+            has_webcam_video=os.path.exists(os.path.join(self.dir, "webcam.mp4")),
+            polar_files=self.files("polar"), empatica_files=self.files("empatica"),
+            survey=None if not sv else {k: sv.get(k) for k in
+                                        ("rtlx", "stres_1_5", "najwieksze_napiecie_czas", "mental", "physical",
+                                         "temporal", "performance", "effort", "frustration")},
+            plot_version=int(os.path.getmtime(plot)) if os.path.exists(plot) else None,
+            frames=sorted(os.path.basename(p) for p in glob.glob(os.path.join(wyn, "klatki", "*.png"))),
+            events=self.events(),
+            results=None)
+        if sm:
+            tm, base = sm.get("task_mean", {}) or {}, sm.get("baseline", {}) or {}
+            d["results"] = {
+                "part": sm.get("analysed_part"), "fragment": sm.get("fragment_s"),
+                "dur": sm.get("dur_s"), "baseline": sm.get("baseline_s"),
+                "load_mean": tm.get("load_index"), "peak": sm.get("peak_load_index"), "peak_time": sm.get("peak_time_s"),
+                "idx": {g: tm.get(f"idx_{g}") for g in ("fizjologia", "ruch", "scena")},
+                "hr": tm.get("hr"), "hr_base": base.get("hr"), "hr_delta": sm.get("hr_delta"),
+                "rmssd": tm.get("rmssd"), "rmssd_base": base.get("rmssd"), "rmssd_ratio": sm.get("rmssd_ratio"),
+                "eda": tm.get("eda_tonic"), "eda_ratio": sm.get("eda_tonic_ratio"),
+                "user_motion": tm.get("user_motion"), "n_objects": tm.get("n_objects"),
+                "polar_source": sm.get("polar_source"), "warnings": sm.get("warnings", []),
+            }
+        return d
+
+
+def list_participants():
+    os.makedirs(SESJE, exist_ok=True)
+    ids = sorted(d for d in os.listdir(SESJE)
+                 if os.path.isdir(os.path.join(SESJE, d)) and not d.startswith(("_", ".")) and ID_RE.match(d))
+    return [Participant(i).brief() for i in ids]
+
+
+# ======================= zadania w tle (nagrywanie, analiza, zestawienie) =======================
+
+class Job:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.state = {"running": False, "name": None, "pid": None, "pct": None, "label": "", "code": None,
+                      "started": None, "ended": None, "seq": 0}
+        self.lines = []
+
+    def snapshot(self, since=0):
+        with self.lock:
+            s = dict(self.state)
+            s["lines"] = self.lines[since:]
+            s["next"] = len(self.lines)
+            s["elapsed"] = (s["ended"] or time.time()) - s["started"] if s["started"] else None
+            return s
+
+    def start(self, name, args, pid=None):
+        with self.lock:
+            if self.state["running"]:
+                return False
+            self.lines = []
+            self.state.update(running=True, name=name, pid=pid, pct=None, label="", code=None,
+                              started=time.time(), ended=None, seq=self.state["seq"] + 1)
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "VR_PROGRESS": "1"}
+        env["PATH"] = os.pathsep.join(conda_paths() + [env.get("PATH", "")])
+        threading.Thread(target=self._run, args=(args, env), daemon=True).start()
+        return True
+
+    def _run(self, args, env):
+        code = -1
+        try:
+            pr = subprocess.Popen([PY, "-u", "-X", "faulthandler"] + args, cwd=ROOT, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, env=env, text=True, encoding="utf-8", errors="replace",
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            for line in pr.stdout:
+                line = line.rstrip("\n")
+                with self.lock:
+                    if line.startswith("@@PROGRESS"):
+                        parts = line.split(" ", 2)
+                        try:
+                            self.state["pct"] = float(parts[1]); self.state["label"] = parts[2] if len(parts) > 2 else ""
+                        except (IndexError, ValueError):
+                            pass
+                    else:
+                        self.lines.append(line)
+            code = pr.wait()
+        except Exception as e:
+            with self.lock:
+                self.lines.append(f"BŁĄD uruchomienia: {e}")
+        with self.lock:
+            if code not in (0, 1, 2, -1):
+                self.lines.append("To błąd systemu Windows (np. brak pliku DLL), a nie błąd danych. "
+                                  "Uruchom aplikację z terminala z aktywnym środowiskiem conda.")
+            self.state.update(running=False, code=code, ended=time.time())
+            if code == 0:
+                self.state["pct"] = 100.0
+
+
+JOB = Job()
+
+REQUIRED = ["numpy", "scipy", "pandas", "matplotlib", "cv2"]
+ENV = {"ok": None, "missing": [], "python": PY}
+
+
+def check_env():
+    """Sprawdza, czy Python, którym liczona jest analiza, ma potrzebne biblioteki."""
+    code = ("import importlib.util as u, json; "
+            f"print(json.dumps([m for m in {REQUIRED!r} if u.find_spec(m) is None]))")
+    env = {**os.environ, "PATH": os.pathsep.join(conda_paths() + [os.environ.get("PATH", "")])}
+    try:
+        out = subprocess.run([PY, "-c", code], capture_output=True, text=True, timeout=60, env=env,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip()
+        ENV["missing"] = json.loads(out.splitlines()[-1]) if out else REQUIRED
+    except Exception:
+        ENV["missing"] = REQUIRED
+    ENV["ok"] = not ENV["missing"]
+    return ENV
+
+
+# ======================= HTTP =======================
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "VRMonitor/1.0"
+
+    def log_message(self, fmt, *args):                       # cisza w terminalu
+        pass
+
+    # --- odpowiedzi ---
+    def send_json(self, obj, code=200):
+        b = json.dumps(obj, ensure_ascii=False, default=float).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers(); self.wfile.write(b)
+
+    def send_err(self, msg, code=400):
+        self.send_json({"error": msg}, code)
+
+    def send_file(self, path, cache=False):
+        if not os.path.isfile(path):
+            return self.send_err("nie ma takiego pliku", 404)
+        ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
+            ctype += "; charset=utf-8"
+        size = os.path.getsize(path)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "max-age=3600" if cache else "no-store")
+        self.end_headers()
+        with open(path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile)
+
+    def body(self, limit=500 * 1024 * 1024):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > limit:
+            raise ValueError("plik za duży")
+        return self.rfile.read(n) if n else b""
+
+    def jbody(self):
+        b = self.body(5 * 1024 * 1024)
+        return json.loads(b.decode("utf-8")) if b else {}
+
+    # --- routing ---
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def do_DELETE(self):
+        self.route("DELETE")
+
+    def route(self, method):
+        u = urllib.parse.urlparse(self.path)
+        path, q = urllib.parse.unquote(u.path), urllib.parse.parse_qs(u.query)
+        try:
+            for m, pat, fn in ROUTES:
+                if m == method:
+                    mt = re.fullmatch(pat, path)
+                    if mt:
+                        return fn(self, q, *mt.groups())
+            self.send_err("nieznany adres", 404)
+        except PermissionError:
+            self.send_err("niedozwolona ścieżka", 403)
+        except (ValueError, KeyError) as e:
+            self.send_err(str(e) or "złe dane", 400)
+        except (BrokenPipeError, ConnectionResetError):
             pass
+        except Exception as e:                                # nie wywracaj serwera
+            try:
+                self.send_err(f"błąd serwera: {e}", 500)
+            except Exception:
+                pass
+
+    # --- strony ---
+    def h_index(self, q):
+        self.send_file(os.path.join(WEB, "index.html"))
+
+    def h_static(self, q, rel):
+        self.send_file(safe_join(WEB, rel))
+
+    def h_survey_form(self, q):
+        self.send_file(os.path.join(ROOT, "evaluation", "ankieta.html"))
+
+    def h_session_file(self, q, pid, rel):
+        p = Participant(pid)
+        self.send_file(safe_join(p.dir, rel))
+
+    def h_eval_file(self, q, rel):
+        self.send_file(safe_join(os.path.join(SESJE, "_ewaluacja"), rel))
+
+    # --- API: uczestnicy ---
+    def h_list(self, q):
+        self.send_json({"participants": list_participants(), "job": JOB.snapshot(10**9), "env": ENV})
+
+    def h_create(self, q):
+        pid = (self.jbody().get("id") or "").strip()
+        if not ID_RE.match(pid):
+            return self.send_err("Kod może zawierać litery, cyfry, '-' i '_' (bez spacji, do 40 znaków).")
+        p = Participant(pid)
+        if p.exists():
+            return self.send_err(f"{pid} już istnieje.", 409)
+        os.makedirs(os.path.join(p.dir, "polar")); os.makedirs(os.path.join(p.dir, "empatica"))
+        p.save_info({"participant": pid})
+        self.send_json(p.detail())
+
+    def h_detail(self, q, pid):
+        p = Participant(pid)
+        if not p.exists():
+            return self.send_err("nie ma takiego uczestnika", 404)
+        self.send_json(p.detail())
+
+    def h_fragment(self, q, pid):
+        p = Participant(pid); b = self.jbody()
+        info = p.info()
+        if b.get("clear"):
+            info.pop("fragment_s", None)
+        else:
+            a, e = float(b["from"]), float(b["to"])
+            d = p.duration()
+            if e <= a or a < 0 or (d and a >= d):
+                return self.send_err("Koniec musi być po początku i w obrębie nagrania.")
+            info["fragment_s"] = [a, min(e, d) if d else e]
+        p.save_info(info)
+        self.send_json(p.detail())
+
+    def h_upload(self, q, pid):
+        p = Participant(pid)
+        kind = (q.get("kind") or [""])[0]
+        if kind not in ("polar", "empatica"):
+            return self.send_err("zły rodzaj pliku")
+        rel = urllib.parse.unquote(self.headers.get("X-Relpath") or self.headers.get("X-Filename") or "plik")
+        parts = [clean_name(x) for x in rel.replace("\\", "/").split("/") if x not in ("", ".", "..")]
+        dest = safe_join(os.path.join(p.dir, kind), *parts)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(self.body())
+        self.send_json({"ok": True, "saved": "/".join(parts)})
+
+    def h_delete_file(self, q, pid):
+        p = Participant(pid); b = self.jbody()
+        kind = b.get("kind")
+        if kind not in ("polar", "empatica"):
+            return self.send_err("zły rodzaj pliku")
+        if b.get("all"):
+            d = os.path.join(p.dir, kind)
+            shutil.rmtree(d, ignore_errors=True); os.makedirs(d, exist_ok=True)
+        else:
+            f = safe_join(os.path.join(p.dir, kind), b["name"])
+            if os.path.isfile(f): os.remove(f)
+        self.send_json(p.detail())
+
+    def h_survey(self, q, pid):
+        p = Participant(pid); d = self.jbody()
+        tlx = ["mental", "physical", "temporal", "performance", "effort", "frustration"]
+        if not all(isinstance(d.get(k), (int, float)) for k in tlx):
+            return self.send_err("niepełna ankieta")
+        d["id"] = pid
+        with open(os.path.join(p.dir, f"ankieta_{pid}.json"), "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2, ensure_ascii=False)
+        self.send_json({"ok": True, "rtlx": d.get("rtlx")})
+
+    def h_open(self, q, pid):
+        p = Participant(pid); what = self.jbody().get("what")
+        target = {"folder": p.dir, "app": os.path.join(p.dir, "app.mp4"), "webcam": os.path.join(p.dir, "webcam.mp4"),
+                  "plot": os.path.join(p.dir, "wyniki", "przebieg.png"),
+                  "frames": os.path.join(p.dir, "wyniki", "klatki")}.get(what)
+        if not target:
+            return self.send_err("nieznany element")
+        self.send_json({"ok": open_local(target)})
+
+    # --- API: zadania ---
+    def h_record(self, q, pid):
+        if not self.env_guard(): return
+        p = Participant(pid); b = self.jbody(); s = settings()
+        if p.status()["nagranie"]:
+            if not b.get("overwrite"):
+                return self.send_err("exists", 409)
+            old = os.path.join(p.dir, f"stare_nagranie_{time.strftime('%Y%m%d_%H%M%S')}")
+            os.makedirs(old)
+            for fn in ("app.mp4", "webcam.mp4", "frames.csv", "events.csv"):
+                if os.path.exists(os.path.join(p.dir, fn)):
+                    shutil.move(os.path.join(p.dir, fn), os.path.join(old, fn))
+        args = [os.path.join(ROOT, "nagrywanie", "record_session.py"), "--id", pid, "--root", SESJE,
+                "--laptop-cam", str(s["laptop_cam"]), "--quest-cam", str(s["quest_cam"])]
+        if s.get("dshow") and sys.platform.startswith("win"):
+            args.append("--dshow")
+        self.job_response(JOB.start("Nagrywanie", args, pid))
+
+    def env_guard(self):
+        if ENV["ok"] is False:
+            self.send_err("Brak bibliotek: " + ", ".join(ENV["missing"]) + ". Uruchom aplikację w środowisku vr "
+                          "(conda activate D:\\srodowiska\\vr, potem python app.py).", 412)
+            return False
+        return True
+
+    def h_analyze(self, q, pid):
+        if not self.env_guard(): return
+        p = Participant(pid); s = p.status()
+        if not (s["nagranie"] or s["polar"] or s["empatica"]):
+            return self.send_err("Brak danych: najpierw nagranie i/lub pliki z opasek.")
+        self.job_response(JOB.start("Analiza", [os.path.join(ROOT, "analysis", "process_session.py"), p.dir], pid))
+
+    def h_evaluate(self, q):
+        if not self.env_guard(): return
+        self.job_response(JOB.start("Zestawienie", [os.path.join(ROOT, "evaluation", "evaluate.py"), SESJE]))
+
+    def h_cameras(self, q):
+        args = [os.path.join(ROOT, "nagrywanie", "record_session.py"), "--list-cameras"]
+        if settings().get("dshow") and sys.platform.startswith("win"):
+            args.append("--dshow")
+        self.job_response(JOB.start("Test kamer", args))
+
+    def job_response(self, ok):
+        if ok:
+            self.send_json(JOB.snapshot())
+        else:
+            self.send_err("Poczekaj, aż skończy się poprzednie zadanie.", 409)
+
+    def h_job(self, q):
+        since = int((q.get("since") or ["0"])[0])
+        self.send_json(JOB.snapshot(since))
+
+    # --- API: ustawienia, zestawienie ---
+    def h_settings_get(self, q):
+        self.send_json(settings())
+
+    def h_settings_set(self, q):
+        b = self.jbody(); s = settings()
+        for k in ("laptop_cam", "quest_cam"):
+            if k in b: s[k] = str(b[k]).strip()
+        if "dshow" in b: s["dshow"] = bool(b["dshow"])
+        with open(SETTINGS, "w") as f:
+            json.dump(s, f, indent=2)
+        self.send_json(s)
+
+    def h_eval(self, q):
+        d = os.path.join(SESJE, "_ewaluacja")
+        out = {"ready": os.path.exists(os.path.join(d, "zestawienie.csv")), "rows": [], "corr": [], "peaks": [],
+               "plot_version": None}
+        import csv as _csv
+        def rows(fn):
+            p = os.path.join(d, fn)
+            if not os.path.exists(p): return []
+            with open(p, encoding="utf-8") as f:
+                return list(_csv.DictReader(f))
+        out["rows"] = rows("zestawienie.csv")
+        out["corr"] = [r for r in rows("korelacje.csv") if r.get("ankieta") == "rtlx"]
+        out["peaks"] = rows("szczyty.csv")
+        pl = os.path.join(d, "wykresy.png")
+        out["plot_version"] = int(os.path.getmtime(pl)) if os.path.exists(pl) else None
+        self.send_json(out)
+
+    def h_open_eval(self, q):
+        self.send_json({"ok": open_local(os.path.join(SESJE, "_ewaluacja"))})
+
+
+P = r"/api/p/([\w\-]{1,40})"
+ROUTES = [
+    ("GET", r"/", Handler.h_index),
+    ("GET", r"/static/(.+)", Handler.h_static),
+    ("GET", r"/ankieta", Handler.h_survey_form),
+    ("GET", r"/files/([\w\-]{1,40})/(.+)", Handler.h_session_file),
+    ("GET", r"/eval-files/(.+)", Handler.h_eval_file),
+    ("GET", r"/api/participants", Handler.h_list),
+    ("POST", r"/api/participants", Handler.h_create),
+    ("GET", P, Handler.h_detail),
+    ("POST", P + r"/fragment", Handler.h_fragment),
+    ("POST", P + r"/upload", Handler.h_upload),
+    ("POST", P + r"/delete-file", Handler.h_delete_file),
+    ("POST", P + r"/survey", Handler.h_survey),
+    ("POST", P + r"/open", Handler.h_open),
+    ("POST", P + r"/record", Handler.h_record),
+    ("POST", P + r"/analyze", Handler.h_analyze),
+    ("POST", r"/api/evaluate", Handler.h_evaluate),
+    ("POST", r"/api/cameras", Handler.h_cameras),
+    ("GET", r"/api/job", Handler.h_job),
+    ("GET", r"/api/settings", Handler.h_settings_get),
+    ("POST", r"/api/settings", Handler.h_settings_set),
+    ("GET", r"/api/eval", Handler.h_eval),
+    ("POST", r"/api/open-eval", Handler.h_open_eval),
+]
+
+
+def free_port(start=8765):
+    for port in range(start, start + 50):
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", port)); return port
+            except OSError:
+                continue
+    raise RuntimeError("brak wolnego portu")
+
+
+def main():
+    os.makedirs(SESJE, exist_ok=True)
+    mimetypes.add_type("application/javascript", ".js"); mimetypes.add_type("text/css", ".css")
+    port = int(os.environ.get("VR_PORT") or free_port())
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://127.0.0.1:{port}/"
+    e = check_env()
+    print(f"Python do analizy: {PY}")
+    if not e["ok"]:
+        print("!" * 70)
+        print(f"! UWAGA: temu Pythonowi brakuje bibliotek: {', '.join(e['missing'])}")
+        print("! Analiza i nagrywanie nie zadziałają. Zamknij (Ctrl+C) i uruchom w środowisku vr:")
+        print("!     conda activate D:\\srodowiska\\vr")
+        print("!     python app.py")
+        print("!" * 70)
+    print(f"Monitor obciążenia VR działa: {url}")
+    print("Zostaw to okno otwarte. Zamknięcie aplikacji: Ctrl+C.")
+    if not os.environ.get("VR_NO_BROWSER"):
+        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nZamknięto.")
 
 
 if __name__ == "__main__":
-    enable_dpi_awareness()
-    App().mainloop()
+    main()

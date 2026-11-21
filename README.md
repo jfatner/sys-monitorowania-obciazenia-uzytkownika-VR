@@ -18,22 +18,28 @@ walidowana ankietą Raw NASA-TLX i krótkim wywiadem.
 Analiza (moduły 1-3) jest we wszystkich wersjach taka sama - różni się tylko sposób obsługi.
 Starsze wersje: zakładka **Tags** na GitHubie albo `git checkout v1.0`.
 
-## Przebieg pracy - aplikacja okienkowa
+## Przebieg pracy - aplikacja
+Uruchom w terminalu PyCharma (środowisko vr):
 ```
 python app.py
 ```
-Po lewej lista uczestników (kropki = nagranie, Polar, Empatica, fragment, ankieta, analiza),
-dla wybranego uczestnika kroki po kolei:
+Aplikacja otworzy się w przeglądarce (działa lokalnie, bez internetu). Terminal zostaw otwarty -
+zamknięcie aplikacji to Ctrl+C. Po lewej lista uczestników, dla wybranego uczestnika pięć kroków:
 
-1. **Nagraj sesję** - okno podglądu (gogle + kamera + maska różnic).
-   W oknie: **R** start/stop, **T** start zadania, **M** synchronizacja, **Q** koniec.
-2. **Dodaj pliki Polar / Empatica** - aplikacja kopiuje je do folderu uczestnika.
-3. **Fragment do analizy** - od-do (mm:ss), „Obejrzyj nagranie” pomaga go znaleźć.
-4. **Ankieta** - „Otwórz formularz”, po zapisaniu „Wczytaj z Pobranych”.
-5. **Analizuj** - pasek postępu, potem wykres i klatki z fragmentu w `wyniki/`.
+1. **Nagraj sesję** - otwiera okno podglądu kolegi (gogle + kamera + maska różnic).
+   W oknie: **R** start/stop, **T** start zadania (koniec spoczynku), **M** synchronizacja, **Q** koniec.
+2. **Pliki z opasek** - przeciągnij pliki Polara / folder Empatiki na kartę albo wybierz je przyciskiem.
+3. **Fragment do analizy** - od-do (mm:ss); oś czasu pokazuje spoczynek i fragment.
+4. **Ankieta** - formularz otwiera się w nowej karcie i po „Zapisz” trafia prosto do folderu uczestnika.
+5. **Analizuj** - pasek postępu z szacowanym czasem; wyniki (kafelki, wykres, klatki) pojawiają się od razu niżej.
 
-Na dole: **Zestawienie wszystkich** (korelacje z ankietami). „Ustawienia kamer” - numery kamer.
-Te same kroki można uruchamiać skryptami (jak w wersji 1).
+Zakładka **Zestawienie** - korelacje wyników z ankietami dla wszystkich uczestników.
+Koło zębate - numery kamer i test, które działają.
+Klasyczna wersja w okienkach: `python app_tk.py`.
+
+Te same kroki da się uruchomić skryptami (bez aplikacji):
+`nagrywanie/record_session.py --id P01`, `analysis/process_session.py sesje/P01`, `evaluation/evaluate.py sesje`.
+Część czasu rzeczywistego (symulator C na QNX/Linux odtwarzający nagrane dane jak na żywo): `./run_stream.sh sesje/P01 1`.
 
 Szczegóły przeprowadzenia sesji: **[PROTOKOL_SESJI.md](PROTOKOL_SESJI.md)**.
 
@@ -66,8 +72,9 @@ a kod w nazwie folderu ułatwia też dzielenie się wynikami bez ujawniania, kto
 | `analysis/config.py` | 2 | **wszystkie progi i wagi w jednym miejscu** |
 | `analysis/process_session.py` | 2 | analiza sesji, wykres, podsumowanie |
 | `analysis/receiver.py` | 2 | odbiór danych z symulatora C na żywo |
-| `app.py` | – | aplikacja okienkowa (tkinter) uruchamiająca skrypty |
-| `evaluation/ankieta.html` | 3 | formularz RTLX + wywiad, zapis do pliku JSON |
+| `app.py`, `web/` | – | aplikacja: lokalny serwer (sam Python) + interfejs w przeglądarce |
+| `app_tk.py` | – | wersja okienkowa (z wersji 2) |
+| `evaluation/ankieta.html` | 3 | formularz RTLX + wywiad (z aplikacji zapis prosto do sesji, osobno - plik JSON) |
 | `evaluation/evaluate.py` | 3 | korelacje Pearsona/Spearmana, zgodność momentu szczytu |
 
 ## Jak liczony jest wskaźnik obciążenia

@@ -18,30 +18,22 @@ walidowana ankietą Raw NASA-TLX i krótkim wywiadem.
 Analiza (moduły 1-3) jest we wszystkich wersjach taka sama - różni się tylko sposób obsługi.
 Starsze wersje: zakładka **Tags** na GitHubie albo `git checkout v1.0`.
 
-## Przebieg pracy - skrypty
-Wszystkie polecenia z głównego folderu projektu, w środowisku vr (`conda activate D:\srodowiska\vr`).
+## Przebieg pracy - aplikacja okienkowa
+```
+python app.py
+```
+Po lewej lista uczestników (kropki = nagranie, Polar, Empatica, fragment, ankieta, analiza),
+dla wybranego uczestnika kroki po kolei:
 
-1. **Nagranie sesji** - okno podglądu (gogle + kamera + maska różnic):
-   ```
-   python nagrywanie/record_session.py --id P01
-   ```
-   W oknie: **R** start/stop, **T** start zadania (koniec spoczynku), **M** synchronizacja, **E** znacznik, **Q** koniec.
-   Numery kamer: `--list-cameras`, potem `--laptop-cam 0 --quest-cam 1`.
-2. **Pliki z opasek** - skopiuj do `sesje/P01/polar/` (pliki `_HR.txt`, `_PPI.txt`) i `sesje/P01/empatica/`.
-3. **Ankieta** - otwórz `evaluation/ankieta.html` w przeglądarce, zapisz, a pobrany `ankieta_P01.json`
-   przenieś do `sesje/P01/`.
-4. **Fragment do analizy** (opcjonalnie) - w `sesje/P01/info.json` dopisz np. `"fragment_s": [90, 170]` (sekundy).
-5. **Analiza** jednej sesji albo wszystkich:
-   ```
-   python analysis/process_session.py sesje/P01
-   python analysis/process_session.py sesje
-   ```
-6. **Zestawienie** (korelacje z ankietami):
-   ```
-   python evaluation/evaluate.py sesje
-   ```
-Część czasu rzeczywistego (symulator C na QNX/Linux/WSL odtwarzający nagrane dane jak na żywo):
-`./run_stream.sh sesje/P01 1`.
+1. **Nagraj sesję** - okno podglądu (gogle + kamera + maska różnic).
+   W oknie: **R** start/stop, **T** start zadania, **M** synchronizacja, **Q** koniec.
+2. **Dodaj pliki Polar / Empatica** - aplikacja kopiuje je do folderu uczestnika.
+3. **Fragment do analizy** - od-do (mm:ss), „Obejrzyj nagranie” pomaga go znaleźć.
+4. **Ankieta** - „Otwórz formularz”, po zapisaniu „Wczytaj z Pobranych”.
+5. **Analizuj** - pasek postępu, potem wykres i klatki z fragmentu w `wyniki/`.
+
+Na dole: **Zestawienie wszystkich** (korelacje z ankietami). „Ustawienia kamer” - numery kamer.
+Te same kroki można uruchamiać skryptami (jak w wersji 1).
 
 Szczegóły przeprowadzenia sesji: **[PROTOKOL_SESJI.md](PROTOKOL_SESJI.md)**.
 
@@ -74,6 +66,7 @@ a kod w nazwie folderu ułatwia też dzielenie się wynikami bez ujawniania, kto
 | `analysis/config.py` | 2 | **wszystkie progi i wagi w jednym miejscu** |
 | `analysis/process_session.py` | 2 | analiza sesji, wykres, podsumowanie |
 | `analysis/receiver.py` | 2 | odbiór danych z symulatora C na żywo |
+| `app.py` | – | aplikacja okienkowa (tkinter) uruchamiająca skrypty |
 | `evaluation/ankieta.html` | 3 | formularz RTLX + wywiad, zapis do pliku JSON |
 | `evaluation/evaluate.py` | 3 | korelacje Pearsona/Spearmana, zgodność momentu szczytu |
 
